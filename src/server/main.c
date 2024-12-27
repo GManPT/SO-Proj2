@@ -22,13 +22,19 @@ struct SharedData {
   pthread_mutex_t directory_mutex;
 };
 
-typedef struct {
+typedef struct client {
   int id;
   char notify_fifo_name[MAX_PIPE_NAME_SIZE];
   char request_fifo_name[MAX_PIPE_NAME_SIZE];
   char response_fifo_name[MAX_PIPE_NAME_SIZE];
   int notify_fifo, request_fifo, response_fifo;
+  KeysSubscribedList* keys_subscribed;
 } Client;
+
+typedef struct keys_subscribed_list {
+  char subscribe_key[MAX_KEY_NAME_SIZE];
+  keys_subscribed_list* next;
+} KeysSubscribedList;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -297,6 +303,13 @@ void close_client_connection(Client client) {
   free(client);
 }
 
+int subscribe_key(Client client, char const* key) {
+  char* value = read_pair(kvs_table, key);
+  int response_code = value != NULL ? 1 : 0;
+  write_msg(client.response_fifo, response_code);
+  while (key)
+}
+
 void* process_messages() {
   char opcode;
   Client client = NULL;
@@ -317,10 +330,10 @@ void* process_messages() {
     }
     else if (opcode == '3') {
       read_msg(fifo_fd, MAX_KEY_NAME_SIZE + 1);
-      subscribe_key(msg);
+      subscribe_key(client, msg);
     } else if (opcode == '4') {
       read_msg(fifo_fd, MAX_KEY_NAME_SIZE + 1);
-      unsubsribe_key(msg);
+      unsubsribe_key(client, msg);
     } else {
       fprintf(stderr, "Invalid Message OP_CODE\n");
     }
