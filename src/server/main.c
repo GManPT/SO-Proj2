@@ -15,26 +15,13 @@
 #include "operations.h"
 #include "io.h"
 #include "pthread.h"
+#include "client.h"
 
 struct SharedData {
   DIR* dir;
   char* dir_name;
   pthread_mutex_t directory_mutex;
 };
-
-typedef struct client {
-  int id;
-  char notify_fifo_name[MAX_PIPE_NAME_SIZE];
-  char request_fifo_name[MAX_PIPE_NAME_SIZE];
-  char response_fifo_name[MAX_PIPE_NAME_SIZE];
-  int notify_fifo, request_fifo, response_fifo;
-  KeysSubscribedList* keys_subscribed;
-} Client;
-
-typedef struct keys_subscribed_list {
-  char subscribe_key[MAX_KEY_NAME_SIZE];
-  keys_subscribed_list* next;
-} KeysSubscribedList;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -45,8 +32,10 @@ size_t max_threads;            // Maximum allowed simultaneous threads
 size_t active_client_connections = 0;
 char* jobs_directory = NULL;
 
-char regist_fifo_name[MAX_PIPE_NAME_SIZE];
+char regist_fifo_name[MAX_PIPE_PATH_LENGTH];
 int regist_fifo;
+Client clients[MAX_NUMBER_SUB];
+int number_of_clients = 0;
 
 static int entry_files(const char* dir, struct dirent* entry, char* in_path, char* out_path) {
   const char* dot = strrchr(entry->d_name, '.');
@@ -85,7 +74,7 @@ static int run_job(int in_fd, int out_fd, char* filename) {
           continue;
         }
 
-        if (kvs_write(num_pairs, keys, values)) {
+        if (kvs_write(num_pairs, keys, values, clients)) {
           write_str(STDERR_FILENO, "Failed to write pair\n");
         }
         break;
@@ -111,7 +100,7 @@ static int run_job(int in_fd, int out_fd, char* filename) {
           continue;
         }
 
-        if (kvs_delete(num_pairs, keys, out_fd)) {
+        if (kvs_delete(num_pairs, keys, out_fd, clients)) {
           write_str(STDERR_FILENO, "Failed to delete pair\n");
         }
         break;
@@ -243,59 +232,61 @@ static void* get_file(void* arguments) {
   pthread_exit(NULL);
 }
 
-char* read_msg(int fifo_fd, size_t buffer_size) {
-  char buf[buffer_size];
-  while ((bytesRead = read(fifo_fd, buf, sizeof(buf) - 1)) > 0) {
-    buf[bytesRead] = '\0';
-  }
-  return buf;
-}
 
-int write_msg(int fifo_fd, const char *msg) {
-  if (msg == NULL || strlen(msg) == 0) {
-    fprintf(stderr, "Message is empty or NULL\n");
-    return 1;
-  }
-  write_str(fifo_fd, msg);
-  return 0;
-}
 
 Client add_client_info(int fifo_fd) {
-  char* client_pipes_names = read_msg(fifo_fd, (MAX_PIPE_NAME_SIZE+1) * 3 + 1);
-  Client client = malloc(sizeof(Client));
-  sscanf(client_pipes_names, "|%s|%s|%s", client.notify_fifo_name, client.request_fifo_name, client.response_fifo_name);
+  Client client = (Client) malloc(sizeof(struct client));
+  if (client == NULL) {
+    fprintf(strerr, "Failed to allocate memory for client\n");
+  }
+  //TODO corrigir NO CASO DE NOMES DE TAMANHO INFERIOR, OS CARACTERES ADICIONAIS DEVEM SER PREENCHIDOS COM '\0'
+  char* client_pipes_names = read_msg(fifo_fd, MAX_PIPE_PATH_LENGTH * 3 + 1);
+  sscanf(client_pipes_names, "%s%s%s", client.notify_fifo_name, client.request_fifo_name, client.response_fifo_name);
   client.notify_fifo = open(client.notify_fifo_name, O_WRONLY | O_NONBLOCK);
   if (client.notify_fifo < 0) {
-    write_str(STDERR_FILENO, "Failed to open FIFO\n");
+    fprintf(stderr, "Failed to open FIFO\n");
     free(client);
-    return NULL;
+    client = NULL;
   }
   client.request_fifo = open(client.request_fifo_name, O_RDONLY | O_NONBLOCK);
   if (client.request_fifo < 0) {
-    write_str(STDERR_FILENO, "Failed to open FIFO\n");
+    fprintf(stderrO, "Failed to open FIFO\n");
     close(client.notify_fifo);
     free(client);
-    return NULL;
+    client = NULL;
   }
   client.response_fifo = open(client.response_fifo_name, O_WRONLY | O_NONBLOCK);
   if (client.response_fifo < 0) {
-    write_str(STDERR_FILENO, "Failed to open FIFO\n");
+    fprintf(stderr, "Failed to open FIFO\n");
     close(client.notify_fifo);
     close(client.request_fifo);
     free(client);
-    return NULL;
+    client = NULL;
   }
-  int result = client != NULL ? 0 : 1;
-  char msg[RESPONSE_CONNECT_DISCONNECT_SIZE];
-  snprintf(msg, RESPONSE_CONNECT_DISCONNECT_SIZE, "%c|%i", opcode, result);
-  write_msg(client.response_fifo, msg);
+  if (client != NULL) {
+    addClient(clients, client);
+    response_code = 0;
+    if (write_all(client.response_fifo, msg, RESPONSE_SIZE+1) == -1) {
+      fprintf(stderr, "Client connection failed\n");
+      close_client_connection(client);
+    } else {
+      number_of_clients++;
+      client.id = number_of_clients;
+    }
+  } else {
+    response_code = 1;
+  }
+  char msg[RESPONSE_SIZE+1];
+  snprintf(msg, RESPONSE_SIZE+1, "%c%i", opcode, result);
   return client;
 }
 
 void close_client_connection(Client client) {
   int result = client != NULL ? 0 : 1;
-  char msg[RESPONSE_CONNECT_DISCONNECT_SIZE];
-  snprintf(msg, RESPONSE_CONNECT_DISCONNECT_SIZE, "%c|%i", opcode, result);
+  number_of_clients--;
+  removeClient(clients, client.id)
+  char msg[RESPONSE_SIZE+1];
+  snprintf(msg, RESPONSE_SIZE+1, "%c%i", opcode, result);
   write_msg(client.response_fifo, msg);
   close(client.notify_fifo);
   close(client.request_fifo);
@@ -306,8 +297,26 @@ void close_client_connection(Client client) {
 int subscribe_key(Client client, char const* key) {
   char* value = read_pair(kvs_table, key);
   int response_code = value != NULL ? 1 : 0;
-  write_msg(client.response_fifo, response_code);
-  while (key)
+  char msg[RESPONSE_SIZE+1];
+  snprintf(msg, RESPONSE_SIZE+1, "3%i", response_code);
+  write_msg(client.response_fifo, msg);
+  int code = keyListAdd(client.keys_subscribed_list, key);
+  if (code == 1) {
+    fprintf(stderr, "The client already subscribed the max num of keys!");
+  } else if (code == 2) {
+    fprintf(stderr, "The client already subscribed that key!");
+  }
+}
+
+int unsubscribe_key(Client client, char const* key) {
+  int response_code = 0;
+  if (keyListDelete(client, key) != 0) {
+    response_code = 1;
+    fprintf(stderr, "The subscription doesn't exist!");
+  }
+  char msg[RESPONSE_SIZE+1];
+  snprintf(msg, RESPONSE_SIZE+1, "3%i", response_code);
+  write_msg(client.response_fifo, msg);
 }
 
 void* process_messages() {
@@ -329,17 +338,16 @@ void* process_messages() {
       return NULL;
     }
     else if (opcode == '3') {
-      read_msg(fifo_fd, MAX_KEY_NAME_SIZE + 1);
+      read_msg(fifo_fd, MAX_STRING_SIZE + 1);
       subscribe_key(client, msg);
     } else if (opcode == '4') {
-      read_msg(fifo_fd, MAX_KEY_NAME_SIZE + 1);
+      read_msg(fifo_fd, MAX_STRING_SIZE + 1);
       unsubsribe_key(client, msg);
     } else {
       fprintf(stderr, "Invalid Message OP_CODE\n");
     }
   }
 }
-
 
 static void dispatch_threads(DIR* dir) {
   pthread_t* threads = malloc(max_threads * sizeof(pthread_t));
@@ -361,7 +369,7 @@ static void dispatch_threads(DIR* dir) {
     }
   }
 
-  // Ler do FIFO
+  // Read messages from FIFO
   pthread_t client_thread;
   if (pthread_create(&client_thread, NULL, process_messages, NULL) != 0) {
     fprintf(stderr, "Failed to create client thread\n");
@@ -424,8 +432,7 @@ int main(int argc, char** argv) {
 		write_str(STDERR_FILENO, "Invalid number of threads\n");
 		return 0;
 	}
-  
-  snprintf(regist_fifo_name, MAX_PIPE_NAME_SIZE, "%s%s", TEMP_FOLDER, argv[4]);
+  snprintf(regist_fifo_name, MAX_PIPE_PATH_LENGTH, "%s%s", TEMP_FOLDER, argv[4]);
   fprintf(stderr, "%s\n", regist_fifo_name);
 
   if (kvs_init()) {
@@ -472,4 +479,4 @@ int main(int argc, char** argv) {
   return 0;
 }
 
-kill(client->client_pid, SIGTERM);
+

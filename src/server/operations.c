@@ -10,6 +10,10 @@
 #include "io.h"
 #include "kvs.h"
 #include "operations.h"
+#include "../common/constants.h"
+#include "../common/io.h"
+#include "client.h"
+
 
 static struct HashTable *kvs_table = NULL;
 
@@ -42,20 +46,21 @@ int kvs_terminate() {
 }
 
 int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE],
-              char values[][MAX_STRING_SIZE]) {
+              char values[][MAX_STRING_SIZE], Client clients[]) {
   if (kvs_table == NULL) {
     fprintf(stderr, "KVS state must be initialized\n");
     return 1;
   }
-
   pthread_rwlock_wrlock(&kvs_table->tablelock);
-
   for (size_t i = 0; i < num_pairs; i++) {
     if (write_pair(kvs_table, keys[i], values[i]) != 0) {
       fprintf(stderr, "Failed to write key pair (%s,%s)\n", keys[i], values[i]);
     }
+    char msg[MAX_STRING_SIZE];
+    snprintf(msg, MAX_STRING_SIZE, "(%s,%s)", keys[i], values[i]);
+    inform_subscribed_clients(clients, keys[i], msg);
+    free(msg);
   }
-
   pthread_rwlock_unlock(&kvs_table->tablelock);
   return 0;
 }
@@ -96,6 +101,7 @@ int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
 
   int aux = 0;
   for (size_t i = 0; i < num_pairs; i++) {
+    if (delete_pair(kvs_table, keys[i]) != 0) {
       if (!aux) {
         write_str(fd, "[");
         aux = 1;
@@ -103,6 +109,11 @@ int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
       char str[MAX_STRING_SIZE];
       snprintf(str, MAX_STRING_SIZE, "(%s,KVSMISSING)", keys[i]);
       write_str(fd, str);
+    }
+    char msg[MAX_STRING_SIZE];
+    snprintf(msg, MAX_STRING_SIZE, "(%s,DELETED)", keys[i], values[i]);
+    inform_subscribed_clients(clients, keys[i], msg);
+    free(msg);
   }
   if (aux) {
     write_str(fd, "]\n");
