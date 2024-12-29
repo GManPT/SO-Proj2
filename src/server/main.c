@@ -34,8 +34,6 @@ char* jobs_directory = NULL;
 
 char regist_fifo_name[MAX_PIPE_PATH_LENGTH];
 int regist_fifo;
-Client clients[MAX_NUMBER_SUB];
-int number_of_clients = 0;
 
 static int entry_files(const char* dir, struct dirent* entry, char* in_path, char* out_path) {
   const char* dot = strrchr(entry->d_name, '.');
@@ -232,121 +230,41 @@ static void* get_file(void* arguments) {
   pthread_exit(NULL);
 }
 
-
-
-Client add_client_info(int fifo_fd) {
-  Client client = (Client) malloc(sizeof(struct client));
-  if (client == NULL) {
-    fprintf(strerr, "Failed to allocate memory for client\n");
-  }
-  //TODO corrigir NO CASO DE NOMES DE TAMANHO INFERIOR, OS CARACTERES ADICIONAIS DEVEM SER PREENCHIDOS COM '\0'
-  char* client_pipes_names = read_msg(fifo_fd, MAX_PIPE_PATH_LENGTH * 3 + 1);
-  sscanf(client_pipes_names, "%s%s%s", client.notify_fifo_name, client.request_fifo_name, client.response_fifo_name);
-  client.notify_fifo = open(client.notify_fifo_name, O_WRONLY | O_NONBLOCK);
-  if (client.notify_fifo < 0) {
-    fprintf(stderr, "Failed to open FIFO\n");
-    free(client);
-    client = NULL;
-  }
-  client.request_fifo = open(client.request_fifo_name, O_RDONLY | O_NONBLOCK);
-  if (client.request_fifo < 0) {
-    fprintf(stderrO, "Failed to open FIFO\n");
-    close(client.notify_fifo);
-    free(client);
-    client = NULL;
-  }
-  client.response_fifo = open(client.response_fifo_name, O_WRONLY | O_NONBLOCK);
-  if (client.response_fifo < 0) {
-    fprintf(stderr, "Failed to open FIFO\n");
-    close(client.notify_fifo);
-    close(client.request_fifo);
-    free(client);
-    client = NULL;
-  }
-  if (client != NULL) {
-    addClient(clients, client);
-    response_code = 0;
-    if (write_all(client.response_fifo, msg, RESPONSE_SIZE+1) == -1) {
-      fprintf(stderr, "Client connection failed\n");
-      close_client_connection(client);
-    } else {
-      number_of_clients++;
-      client.id = number_of_clients;
-    }
-  } else {
-    response_code = 1;
-  }
-  char msg[RESPONSE_SIZE+1];
-  snprintf(msg, RESPONSE_SIZE+1, "%c%i", opcode, result);
-  return client;
-}
-
-void close_client_connection(Client client) {
-  int result = client != NULL ? 0 : 1;
-  number_of_clients--;
-  removeClient(clients, client.id)
-  char msg[RESPONSE_SIZE+1];
-  snprintf(msg, RESPONSE_SIZE+1, "%c%i", opcode, result);
-  write_msg(client.response_fifo, msg);
-  close(client.notify_fifo);
-  close(client.request_fifo);
-  close(client.response_fifo);
-  free(client);
-}
-
-int subscribe_key(Client client, char const* key) {
-  char* value = read_pair(kvs_table, key);
-  int response_code = value != NULL ? 1 : 0;
-  char msg[RESPONSE_SIZE+1];
-  snprintf(msg, RESPONSE_SIZE+1, "3%i", response_code);
-  write_msg(client.response_fifo, msg);
-  int code = keyListAdd(client.keys_subscribed_list, key);
-  if (code == 1) {
-    fprintf(stderr, "The client already subscribed the max num of keys!");
-  } else if (code == 2) {
-    fprintf(stderr, "The client already subscribed that key!");
-  }
-}
-
-int unsubscribe_key(Client client, char const* key) {
-  int response_code = 0;
-  if (keyListDelete(client, key) != 0) {
-    response_code = 1;
-    fprintf(stderr, "The subscription doesn't exist!");
-  }
-  char msg[RESPONSE_SIZE+1];
-  snprintf(msg, RESPONSE_SIZE+1, "3%i", response_code);
-  write_msg(client.response_fifo, msg);
-}
-
 void* process_messages() {
   char opcode;
-  Client client = NULL;
+  Client* client = NULL;
   int fifo_fd;
   int regist_client = 0;
+  int well_disconnected_client = 0;
   while (1) {
-    fifo_fd = !regist_client ? regist_fifo : client.request_fifo;
-    ssize_t bytesRead = read(fifo_fd, &opcode, sizeof(opcode));
-    if (bytesRead <= 0) return NULL;
+    fifo_fd = !regist_client ? regist_fifo : client->request_fifo;
+    opcode = read_msg(fifo_fd, 2);
+    if (opcode == NULL) break; 
     if (!regist_client && opcode != '1') continue;
     if (opcode == '1' && !regist_client) {
-      client = add_client_info(regist_fifo);
+      char* client_pipes_names = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
+      if (client_pipes_names == NULL) break;
+      client = add_client_info(regist_fifo, client_pipes_names);
       regist_client = 1;
     }
     else if (opcode == '2') {
-      close_client_connection();
+      close_client_connection(client);
+      well_disconnected_client = 1;
       return NULL;
     }
     else if (opcode == '3') {
-      read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-      subscribe_key(client, msg);
+      char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
+      if (key == NULL) break;
+      subscribe_key(client, key);
     } else if (opcode == '4') {
-      read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-      unsubsribe_key(client, msg);
+      char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
+      if (key == NULL) break;
+      unsubsribe_key(client, key);
     } else {
       fprintf(stderr, "Invalid Message OP_CODE\n");
     }
   }
+  if (regist_client && !well_disconnected_client) close_client_connection(client);
 }
 
 static void dispatch_threads(DIR* dir) {

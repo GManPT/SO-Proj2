@@ -91,7 +91,7 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
   return 0;
 }
 
-int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
+int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd, Client clients[]) {
   if (kvs_table == NULL) {
     fprintf(stderr, "KVS state must be initialized\n");
     return 1;
@@ -111,7 +111,7 @@ int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
       write_str(fd, str);
     }
     char msg[MAX_STRING_SIZE];
-    snprintf(msg, MAX_STRING_SIZE, "(%s,DELETED)", keys[i], values[i]);
+    snprintf(msg, MAX_STRING_SIZE, "(%s,DELETED)", keys[i]);
     inform_subscribed_clients(clients, keys[i], msg);
     free(msg);
   }
@@ -187,4 +187,8 @@ int kvs_backup(size_t num_backup,char* job_filename , char* directory) {
 void kvs_wait(unsigned int delay_ms) {
   struct timespec delay = delay_to_timespec(delay_ms);
   nanosleep(&delay, NULL);
+}
+
+char* kvs_get_value(const char* key) {
+  return read_pair(kvs_table, key);
 }

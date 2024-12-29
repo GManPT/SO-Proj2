@@ -17,7 +17,7 @@ int kvs_terminate();
 /// @param keys Array of keys' strings.
 /// @param values Array of values' strings.
 /// @return 0 if the pairs were written successfully, 1 otherwise.
-int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE], char values[][MAX_STRING_SIZE]);
+int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE], char values[][MAX_STRING_SIZE], Client clients[]);
 
 /// Reads values from the KVS.
 /// @param num_pairs Number of pairs to read.
@@ -30,7 +30,7 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd);
 /// @param num_pairs Number of pairs to read.
 /// @param keys Array of keys' strings.
 /// @return 0 if the pairs were deleted successfully, 1 otherwise.
-int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd);
+int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd, Client clients[]);
 
 /// Writes the state of the KVS.
 /// @param fd File descriptor to write the output.
@@ -59,5 +59,7 @@ void set_n_current_backups(int _n_current_backups);
 // Getter for n_current_backups
 // @return n_current_backups
 int get_n_current_backups();
+
+char* kvs_get_value(const char* key);
 
 #endif  // KVS_OPERATIONS_H
