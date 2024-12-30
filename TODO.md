@@ -1,4 +1,6 @@
+# ADD PIPES SEPARATOR
 # CHANGE TO WRITE_STRING AND READ_STRING
+# USE write_uint and strn_memcpy
 # ADD OPCODE ENUM
 # VERIFY VALUES OF subscribe_key and unsubscribe_key
 # CLOSE CLIENT CONNECTION WELL
