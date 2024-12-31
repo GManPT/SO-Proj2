@@ -16,6 +16,9 @@
 #include "io.h"
 #include "pthread.h"
 #include "client.h"
+#include "io.h"
+#include "../common/io.h"
+#include "../common/protocol.h"
 
 struct SharedData {
   DIR* dir;
@@ -32,7 +35,7 @@ size_t max_threads;            // Maximum allowed simultaneous threads
 size_t active_client_connections = 0;
 char* jobs_directory = NULL;
 
-char regist_fifo_name[MAX_PIPE_PATH_LENGTH];
+char regist_fifo_name_path[MAX_PIPE_PATH_LENGTH+5];
 int regist_fifo;
 
 static int entry_files(const char* dir, struct dirent* entry, char* in_path, char* out_path) {
@@ -230,41 +233,66 @@ static void* get_file(void* arguments) {
   pthread_exit(NULL);
 }
 
-void* process_messages() {
-  char opcode;
+int handle_message_client_connect(int fifo_fd, Client* client) {
+  char* client_pipes_names = read_msg(fifo_fd, MAX_PIPE_PATH_LENGTH*3 + 1);
+  if (client_pipes_names == NULL || add_client_info(regist_fifo, client_pipes_names, &client)) {
+    if (client != NULL) {
+      if (write_response(client->response_fifo, 1, CONNECT_INVALID) == 0) {
+        close(client->response_fifo);
+      }
+      free(client);
+    }
+    return 1;
+  }
+  if (write_response(client->response_fifo, 1, CONNECT_SUCCESS)) {
+    close_client_connection(client);
+    return 1;
+  }
+  return 0;
+}
+
+void* process_messages_from_client() {
+  int opcode;
   Client* client = NULL;
   int fifo_fd;
   int regist_client = 0;
-  int well_disconnected_client = 0;
   while (1) {
     fifo_fd = !regist_client ? regist_fifo : client->request_fifo;
-    opcode = read_msg(fifo_fd, 2);
-    if (opcode == NULL) break; 
+    opcode = read_opcode(fifo_fd);
+    if (opcode == -1) break; // PODE DAR ERRADO POR CAUSA DO EOF
     if (!regist_client && opcode != '1') continue;
-    if (opcode == '1' && !regist_client) {
-      char* client_pipes_names = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-      if (client_pipes_names == NULL) break;
-      client = add_client_info(regist_fifo, client_pipes_names);
-      regist_client = 1;
-    }
-    else if (opcode == '2') {
-      close_client_connection(client);
-      well_disconnected_client = 1;
-      return NULL;
-    }
-    else if (opcode == '3') {
-      char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-      if (key == NULL) break;
-      subscribe_key(client, key);
-    } else if (opcode == '4') {
-      char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-      if (key == NULL) break;
-      unsubsribe_key(client, key);
-    } else {
-      fprintf(stderr, "Invalid Message OP_CODE\n");
+    switch (opcode) {
+      case OP_CODE_CONNECT:
+        if (regist_client) continue;
+        if (handle_message_client_connect(fifo_fd, client)) {
+          return NULL;
+        }
+        regist_client = 1;
+        break;
+      case OP_CODE_DISCONNECT:
+        close_client_connection(client);
+        return NULL;
+      case OP_CODE_SUBSCRIBE:
+        char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
+        if (key == NULL) {
+          close_client_connection(client);
+          return NULL;
+        }
+        subscribe_key(client, key);
+        break;
+      case OP_CODE_UNSUBSCRIBE:
+        char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
+        if (key == NULL) {
+          close_client_connection(client);
+          return NULL;
+        }
+        unsubsribe_key(client, key);
+        break;
+      default:
+        fprintf(stderr, "Invalid Message OP_CODE\n");
+        break;
     }
   }
-  if (regist_client && !well_disconnected_client) close_client_connection(client);
 }
 
 static void dispatch_threads(DIR* dir) {
@@ -287,9 +315,8 @@ static void dispatch_threads(DIR* dir) {
     }
   }
 
-  // Read messages from FIFO
   pthread_t client_thread;
-  if (pthread_create(&client_thread, NULL, process_messages, NULL) != 0) {
+  if (pthread_create(&client_thread, NULL, process_messages_from_client, NULL) != 0) {
     fprintf(stderr, "Failed to create client thread\n");
     pthread_mutex_destroy(&thread_data.directory_mutex);
     free(threads);
@@ -350,8 +377,9 @@ int main(int argc, char** argv) {
 		write_str(STDERR_FILENO, "Invalid number of threads\n");
 		return 0;
 	}
-  snprintf(regist_fifo_name, MAX_PIPE_PATH_LENGTH, "%s%s", TEMP_FOLDER, argv[4]);
-  fprintf(stderr, "%s\n", regist_fifo_name);
+  
+  snprintf(regist_fifo_name_path, MAX_PIPE_PATH_LENGTH+5+1, "%s%s", TEMP_FOLDER, argv[4]);
+  fprintf(stderr, "%s\n", regist_fifo_name_path);
 
   if (kvs_init()) {
     write_str(STDERR_FILENO, "Failed to initialize KVS\n");
@@ -365,7 +393,7 @@ int main(int argc, char** argv) {
   }
 
   // Create FIFO
-  if (mkfifo(regist_fifo_name, 0777) < 0) {
+  if (mkfifo(regist_fifo_name_path, 0777) < 0) {
     if (errno == EEXIST) {
       write_str(STDERR_FILENO, "FIFO already exists\n");
     } else {
@@ -373,7 +401,7 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  regist_fifo = open(regist_fifo_name, O_RDONLY | O_NONBLOCK);
+  regist_fifo = open(regist_fifo_name_path, O_RDONLY | O_NONBLOCK);
   if (regist_fifo < 0) {
     write_str(STDERR_FILENO, "Failed to open FIFO\n");
     return 1;
@@ -393,7 +421,6 @@ int main(int argc, char** argv) {
 
   kvs_terminate();
   close(regist_fifo);
-  unlink(regist_fifo_name);
   return 0;
 }
 

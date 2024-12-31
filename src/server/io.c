@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include "../common/io.h"
 
 void write_str(int fd, const char *str) {
   size_t len = strlen(str);
@@ -38,8 +39,16 @@ void write_uint(int fd, int value) {
 }
 
 size_t strn_memcpy(char* dest, const char* src, size_t n) {
-    // strnlen is async signal safe in recent versions of POSIX
-    size_t bytes_to_copy = strnlen(src, n);
-    memcpy(dest, src, bytes_to_copy);
-    return bytes_to_copy;
+  // strnlen is async signal safe in recent versions of POSIX
+  size_t bytes_to_copy = strnlen(src, n);
+  memcpy(dest, src, bytes_to_copy);
+  return bytes_to_copy;
+}
+
+int write_response(int fd, int opcode) {
+  int response_code;
+  if (write_opcode(fd, opcode)) {
+    response_code = 0;
+  }
+
 }

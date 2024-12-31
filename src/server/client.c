@@ -5,14 +5,14 @@
 #include "constants.h"
 #include "client.h"
 #include "operations.h"
+#include "io.h"
 #include "../common/constants.h"
 #include "../common/io.h"
-
 
 char* read_msg(int fifo_fd, size_t size) {
   char msg[size];
   int intr = 0;
-  int result = read_all(fifo_fd, size, MAX_WRITE_SIZE, &intr);
+  int result = read_all(fifo_fd, msg, size, &intr);
   if (result == -1) {
     if (intr)
       fprintf(stderr, "Read operation interrupted.\n");
@@ -31,6 +31,7 @@ int write_msg(int fifo_fd, char* msg, size_t size) {
   }
   return 0;
 }
+
 
 int keyListExists(Client* client, char const* key) {
   for (int i = 0; i < client->subscribed_keys_num; i++) {
@@ -91,51 +92,37 @@ int removeClient(Client* clients[], int id) {
   return 1;
 }
 
-Client* add_client_info(int fifo_fd, char* client_pipes_names) {
-  int response_code;
-  Client* client = (Client*) malloc(sizeof(Client));
+int add_client_info(int fifo_fd, char* client_pipes_names, Client* client) {
   if (client == NULL) {
     fprintf(stderr, "Failed to allocate memory for client\n");
+    return 1;
   }
-  //TODO corrigir NO CASO DE NOMES DE TAMANHO INFERIOR, OS CARACTERES ADICIONAIS DEVEM SER PREENCHIDOS COM '\0'
-  sscanf(client_pipes_names, "%s%s%s", client->notify_fifo_name, client->request_fifo_name, client->response_fifo_name);
-  client->notify_fifo = open(client->notify_fifo_name, O_WRONLY | O_NONBLOCK);
-  if (client->notify_fifo < 0) {
+  size_t offset = 0;
+  offset += strn_memcpy(client->request_fifo, client_pipes_names + offset, MAX_PIPE_PATH_LENGTH + 1);
+  offset += strn_memcpy(client->response_fifo_name, client_pipes_names + offset, MAX_PIPE_PATH_LENGTH + 1);
+  offset += strn_memcpy(client->notify_fifo_name, client_pipes_names + offset, MAX_PIPE_PATH_LENGTH + 1);
+  client->response_fifo = open(client->response_fifo_name, O_WRONLY | O_NONBLOCK);
+  if (client->response_fifo < 0) {
     fprintf(stderr, "Failed to open FIFO\n");
     free(client);
-    client = NULL;
+    return 1;
   }
   client->request_fifo = open(client->request_fifo_name, O_RDONLY | O_NONBLOCK);
   if (client->request_fifo < 0) {
     fprintf(stderr, "Failed to open FIFO\n");
-    close(client->notify_fifo);
-    free(client);
-    client = NULL;
+    return 1;
   }
-  client->response_fifo = open(client->response_fifo_name, O_WRONLY | O_NONBLOCK);
-  if (client->response_fifo < 0) {
-    fprintf(stderr, "Failed to open FIFO\n");
-    close(client->notify_fifo);
+  client->notify_fifo = open(client->notify_fifo_name, O_RDWR | O_NONBLOCK);
+  if (client->notify_fifo < 0) {
     close(client->request_fifo);
-    free(client);
-    client = NULL;
-  }
-  if (client != NULL) {
-    addClient(clients, client);
-    response_code = 0;
-  } else {
-    response_code = 1;
-  }
-  char msg[RESPONSE_SIZE+1];
-  snprintf(msg, RESPONSE_SIZE+1, "1%i", response_code);
-  if (response_code == 1 || write_msg(client->response_fifo, msg, RESPONSE_SIZE+1) == 1) {
-    close_client_connection(client);
-    return NULL;
+    fprintf(stderr, "Failed to open FIFO\n");
+    return 1;
   }
   client->subscribed_keys_num = 0;
   number_of_clients++;
   client->id = number_of_clients;
-  return client;
+  addClient(clients, client);
+  return 0;
 }
 
 void close_client_connection(Client* client) {
@@ -161,6 +148,7 @@ int subscribe_key(Client* client, char const* key) {
     close_client_connection(client);
     return 1;
   }
+  if (!response_code) return 1;
   int code = keyListAdd(client->keys_subscribed, key);
   if (code == 1) {
     fprintf(stderr, "The client already subscribed the max num of keys!");

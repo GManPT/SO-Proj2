@@ -6,7 +6,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include "src/common/constants.h"
+#include "../common/constants.h"
+#include "../common/io.h"
  
  
 int read_all(int fd, void *buffer, size_t size, int *intr) {
@@ -67,6 +68,28 @@ int write_all(int fd, const void *buffer, size_t size) {
     bytes_written += (size_t)result;
   }
   return 1;
+}
+
+int read_opcode(int fifo_fd) {
+  char opcode;
+  ssize_t bytes_read = read(fifo_fd, &opcode, 1);
+  if (bytes_read == -1) {
+    perror("Failed to read opcode");
+    return -1;
+  } else if (bytes_read == 0) {
+    fprintf(stderr, "End of file reached while reading opcode\n");
+    return -1;
+  }
+  return (int)opcode;  // Return the opcode as an int
+}
+
+int write_opcode_or_response(int fd, int opcode) {
+  write_uint(fd, opcode);
+  if (errno != 0) {
+    fprintf(stderr, "Error writing opcode to file descriptor");
+    return 1;
+  }
+  return 0;
 }
 
 static struct timespec delay_to_timespec(unsigned int delay_ms) {
