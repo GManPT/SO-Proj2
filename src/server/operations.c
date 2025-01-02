@@ -3,19 +3,29 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "constants.h"
 #include "io.h"
+#include "src/common/io.h"
 #include "kvs.h"
 #include "operations.h"
-#include "../common/constants.h"
-#include "../common/io.h"
-#include "client.h"
-
 
 static struct HashTable *kvs_table = NULL;
+
+// Define the callback functions
+static kvs_callback_t write_callback = NULL;
+static kvs_callback_t delete_callback = NULL;
+
+void register_write_callback(kvs_callback_t callback) {
+  write_callback = callback;
+}
+
+void register_delete_callback(kvs_callback_t callback) {
+  delete_callback = callback;
+}
 
 /// Calculates a timespec from a delay in milliseconds.
 /// @param delay_ms Delay in milliseconds.
@@ -46,21 +56,32 @@ int kvs_terminate() {
 }
 
 int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE],
-              char values[][MAX_STRING_SIZE], Client clients[]) {
+              char values[][MAX_STRING_SIZE]) {
   if (kvs_table == NULL) {
     fprintf(stderr, "KVS state must be initialized\n");
     return 1;
   }
+
   pthread_rwlock_wrlock(&kvs_table->tablelock);
+
   for (size_t i = 0; i < num_pairs; i++) {
+    // Compare if old value is different from new value
+    char *old_value = read_pair(kvs_table, keys[i]);
+    if (old_value != NULL && strcmp(old_value, values[i]) == 0) {
+      free(old_value);
+      continue;
+    }
+
     if (write_pair(kvs_table, keys[i], values[i]) != 0) {
       fprintf(stderr, "Failed to write key pair (%s,%s)\n", keys[i], values[i]);
+      continue;
     }
-    char msg[MAX_STRING_SIZE];
-    snprintf(msg, MAX_STRING_SIZE, "(%s,%s)", keys[i], values[i]);
-    inform_subscribed_clients(clients, keys[i], msg);
-    free(msg);
+
+    if (write_callback != NULL) {
+      write_callback(keys[i], values[i]);
+    }
   }
+
   pthread_rwlock_unlock(&kvs_table->tablelock);
   return 0;
 }
@@ -91,12 +112,12 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
   return 0;
 }
 
-int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd, Client clients[]) {
+int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
   if (kvs_table == NULL) {
     fprintf(stderr, "KVS state must be initialized\n");
     return 1;
   }
-  
+
   pthread_rwlock_wrlock(&kvs_table->tablelock);
 
   int aux = 0;
@@ -109,11 +130,12 @@ int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd, Client cl
       char str[MAX_STRING_SIZE];
       snprintf(str, MAX_STRING_SIZE, "(%s,KVSMISSING)", keys[i]);
       write_str(fd, str);
+      continue;
     }
-    char msg[MAX_STRING_SIZE];
-    snprintf(msg, MAX_STRING_SIZE, "(%s,DELETED)", keys[i]);
-    inform_subscribed_clients(clients, keys[i], msg);
-    free(msg);
+
+    if (delete_callback != NULL) {
+      delete_callback(keys[i], NULL);
+    }
   }
   if (aux) {
     write_str(fd, "]\n");
@@ -189,6 +211,24 @@ void kvs_wait(unsigned int delay_ms) {
   nanosleep(&delay, NULL);
 }
 
-char* kvs_get_value(const char* key) {
-  return read_pair(kvs_table, key);
+int fifo_init(char *fifo_name) {
+  // Remove the FIFO if it already exists
+  unlink(fifo_name);
+  if (mkfifo(fifo_name, 0777) == -1) return 1;
+  return 0;
+}
+
+int kvs_key_exists(char *key) {
+  if (kvs_table == NULL) {
+    fprintf(stderr, "KVS state must be initialized\n");
+    return 1;
+  }
+
+  // Lock the table for reading and check if the key exists
+  pthread_rwlock_rdlock(&kvs_table->tablelock);
+  char *result = read_pair(kvs_table, key);
+  int exists = (result == NULL);
+  free(result);
+  pthread_rwlock_unlock(&kvs_table->tablelock);
+  return exists;
 }

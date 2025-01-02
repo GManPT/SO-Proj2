@@ -4,6 +4,11 @@
 #include <stddef.h>
 #include "constants.h"
 
+// Callback function type for key value pairs.
+// @param key Key of the pair.
+// @param value Value of the pair.
+typedef void (*kvs_callback_t)(const char* key, const char* value);
+
 /// Initializes the KVS state.
 /// @return 0 if the KVS state was initialized successfully, 1 otherwise.
 int kvs_init();
@@ -17,7 +22,7 @@ int kvs_terminate();
 /// @param keys Array of keys' strings.
 /// @param values Array of values' strings.
 /// @return 0 if the pairs were written successfully, 1 otherwise.
-int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE], char values[][MAX_STRING_SIZE], Client clients[]);
+int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE], char values[][MAX_STRING_SIZE]);
 
 /// Reads values from the KVS.
 /// @param num_pairs Number of pairs to read.
@@ -30,7 +35,7 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd);
 /// @param num_pairs Number of pairs to read.
 /// @param keys Array of keys' strings.
 /// @return 0 if the pairs were deleted successfully, 1 otherwise.
-int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd, Client clients[]);
+int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd);
 
 /// Writes the state of the KVS.
 /// @param fd File descriptor to write the output.
@@ -60,6 +65,19 @@ void set_n_current_backups(int _n_current_backups);
 // @return n_current_backups
 int get_n_current_backups();
 
-char* kvs_get_value(const char* key);
+// Initializes the fifo with the given name
+// @param fifo_name
+// @return 0 if the fifo was initialized successfully, 1 otherwise.
+int fifo_init(char* fifo_name);
+
+// Checks if a key exists in the KVS.
+// @param key Key to check.
+// @return 0 if the key exists, 1 otherwise.
+int kvs_key_exists(char* key);
+
+// Calls the callback function for the given key and value
+// @param callback Callback function to be called
+void register_write_callback(kvs_callback_t callback);
+void register_delete_callback(kvs_callback_t callback); 
 
 #endif  // KVS_OPERATIONS_H

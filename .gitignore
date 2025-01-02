@@ -1,4 +1,10 @@
-.vscode
+compile_flags.txt
+src/client/client
+src/client/client_write
+src/server/ems
+src/server/jobs
 *.o
-tests/
-*.pdf
+*.out
+.vscode
+.clang-format
+.DS_Store

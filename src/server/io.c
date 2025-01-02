@@ -2,24 +2,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include "../common/io.h"
-
-void write_str(int fd, const char *str) {
-  size_t len = strlen(str);
-  const char *ptr = str;
-
-  while (len > 0) {
-    ssize_t written = write(fd, ptr, len);
-
-    if (written < 0) {
-      perror("Error writing string");
-      break;
-    }
-
-    ptr += written;
-    len -= (size_t)written;
-  }
-}
 
 void write_uint(int fd, int value) {
   char buffer[16];
@@ -39,16 +21,8 @@ void write_uint(int fd, int value) {
 }
 
 size_t strn_memcpy(char* dest, const char* src, size_t n) {
-  // strnlen is async signal safe in recent versions of POSIX
-  size_t bytes_to_copy = strnlen(src, n);
-  memcpy(dest, src, bytes_to_copy);
-  return bytes_to_copy;
-}
-
-int write_response(int fd, int opcode) {
-  int response_code;
-  if (write_opcode(fd, opcode)) {
-    response_code = 0;
-  }
-
+    // strnlen is async signal safe in recent versions of POSIX
+    size_t bytes_to_copy = strnlen(src, n);
+    memcpy(dest, src, bytes_to_copy);
+    return bytes_to_copy;
 }

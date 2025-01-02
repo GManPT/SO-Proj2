@@ -17,9 +17,10 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  char req_pipe_path[256] = "/tmp/req";
-  char resp_pipe_path[256] = "/tmp/resp";
-  char notif_pipe_path[256] = "/tmp/notif";
+  char req_pipe_path[MAX_PIPE_PATH_LENGTH] = "/tmp/req";
+  char resp_pipe_path[MAX_PIPE_PATH_LENGTH] = "/tmp/resp";
+  char notif_pipe_path[MAX_PIPE_PATH_LENGTH] = "/tmp/notif";
+  char server_pipe_path[MAX_PIPE_PATH_LENGTH] = "/tmp/";
 
   char keys[MAX_NUMBER_SUB][MAX_STRING_SIZE] = {0};
   unsigned int delay_ms;
@@ -28,18 +29,41 @@ int main(int argc, char* argv[]) {
   strncat(req_pipe_path, argv[1], strlen(argv[1]) * sizeof(char));
   strncat(resp_pipe_path, argv[1], strlen(argv[1]) * sizeof(char));
   strncat(notif_pipe_path, argv[1], strlen(argv[1]) * sizeof(char));
+  strncat(server_pipe_path, argv[2], strlen(argv[2]) * sizeof(char));
 
-  // TODO open pipes
+  // Connect to server
+  if (kvs_connect(req_pipe_path, resp_pipe_path, server_pipe_path, notif_pipe_path)) {
+    write_str(STDOUT_FILENO, "Server returned 1 for operation: connect\n");
+    return 1;
+  }
+  write_str(STDOUT_FILENO, "Server returned 0 for operation: connect\n");
+
+  // Start notifications thread
+  pthread_t notifications_thread;
+  if (pthread_create(&notifications_thread, NULL, kvs_notifications, NULL) != 0) {
+    fprintf(stderr, "Failed to create notifications thread\n");
+    if (kvs_disconnect() != 0) {
+      fprintf(stderr, "Failed to disconnect to the server\n");
+      return 1;
+    }
+  }
 
   while (1) {
     switch (get_next(STDIN_FILENO)) {
       case CMD_DISCONNECT:
         if (kvs_disconnect() != 0) {
+          write_str(STDOUT_FILENO, "Server returned 1 for operation: disconnect\n");
           fprintf(stderr, "Failed to disconnect to the server\n");
           return 1;
         }
-        // TODO: end notifications thread
-        printf("Disconnected from server\n");
+        
+        // End notifications thread
+        if (pthread_cancel(notifications_thread) != 0) {
+          fprintf(stderr, "Failed to cancel notifications thread\n");
+          return 1;
+        }
+        
+        write_str(STDOUT_FILENO, "Server returned 0 for operation: disconnect\n");
         return 0;
 
       case CMD_SUBSCRIBE:
@@ -48,11 +72,14 @@ int main(int argc, char* argv[]) {
           fprintf(stderr, "Invalid command. See HELP for usage\n");
           continue;
         }
-         
+        
         if (kvs_subscribe(keys[0])) {
-            fprintf(stderr, "Command subscribe failed\n");
+          write_str(STDOUT_FILENO, "Server returned 1 for operation: subscribe\n");
+          fprintf(stderr, "Command subscribe failed\n");
+          break;
         }
-
+        
+        write_str(STDOUT_FILENO, "Server returned 0 for operation: subscribe\n");
         break;
 
       case CMD_UNSUBSCRIBE:
@@ -61,11 +88,14 @@ int main(int argc, char* argv[]) {
           fprintf(stderr, "Invalid command. See HELP for usage\n");
           continue;
         }
-         
+
         if (kvs_unsubscribe(keys[0])) {
-            fprintf(stderr, "Command subscribe failed\n");
+          write_str(STDOUT_FILENO, "Server returned 1 for operation: unsubscribe\n");
+          fprintf(stderr, "Command unsubscribe failed\n");
+          break;
         }
 
+        write_str(STDOUT_FILENO, "Server returned 0 for operation: unsubscribe\n");
         break;
 
       case CMD_DELAY:
@@ -88,7 +118,10 @@ int main(int argc, char* argv[]) {
         break;
 
       case EOC:
-        // input should end in a disconnect, or it will loop here forever
+        if (kvs_disconnect() != 0) {
+          fprintf(stderr, "Failed to disconnect to the server\n");
+          return 1;
+        }
         break;
     }
   }

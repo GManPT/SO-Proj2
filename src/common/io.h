@@ -22,8 +22,11 @@ int read_string(int fd, char *str);
 /// @return On success, returns 1, on error, returns -1
 int write_all(int fd, const void *buffer, size_t size);
 
-int read_opcode(int fifo_fd);
-int write_opcode(int fd, int opcode);
+
+/// Writes a string to the given file descriptor.
+/// @param fd The file descriptor to write to.
+/// @param str The string to write.
+void write_str(int fd, const char *str);
 
 void delay(unsigned int time_ms);
 

@@ -5,25 +5,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <stdio.h>
 #include <errno.h>
+#include <semaphore.h>
+#include <signal.h>
 
 #include "constants.h"
+#include "src/common/constants.h"
+#include "src/common/protocol.h"
 #include "parser.h"
 #include "operations.h"
 #include "io.h"
+#include "src/common/io.h"
 #include "pthread.h"
-#include "client.h"
-#include "io.h"
-#include "../common/io.h"
-#include "../common/protocol.h"
 
 struct SharedData {
   DIR* dir;
   char* dir_name;
   pthread_mutex_t directory_mutex;
+};
+
+struct ClientData {
+  int fds[3];
+  char keys[MAX_NUMBER_SUB][MAX_STRING_SIZE + 1];
+  int num_keys;
+  pthread_mutex_t keys_mutex;
+  struct ClientData* next;
+};
+
+struct ClientList {
+  struct ClientData* head;
+  pthread_mutex_t list_mutex;
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -32,11 +45,69 @@ pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
 size_t active_backups = 0;     // Number of active backups
 size_t max_backups;            // Maximum allowed simultaneous backups
 size_t max_threads;            // Maximum allowed simultaneous threads
-size_t active_client_connections = 0;
 char* jobs_directory = NULL;
 
-char regist_fifo_name_path[MAX_PIPE_PATH_LENGTH+5];
-int regist_fifo;
+char regist_fifo_name[MAX_STRING_SIZE]; // Name of the FIFO
+sem_t client_sem; // Semaphore to control the number of threads
+struct ClientList client_list = {NULL, PTHREAD_MUTEX_INITIALIZER}; // List of clients
+
+static int client_disconnect(struct ClientData* client) {
+  // Remove client from list
+  if (pthread_mutex_lock(&client_list.list_mutex) != 0) {
+    fprintf(stderr, "Failed to lock list_mutex\n");
+    if (write_all(client->fds[1], "21", MAX_RESPONSE_SIZE-1) == -1) {
+      fprintf(stderr, "Failed to send response\n");
+    }
+    return 1;
+  }
+  
+  struct ClientData* current = client_list.head;
+  struct ClientData* prev = NULL;
+  while (current != NULL) {
+    if (current == client) {
+      if (prev == NULL) {
+        client_list.head = current->next;
+      } else {
+        prev->next = current->next;
+      }
+      break;
+    }
+    prev = current;
+    current = current->next;
+  }
+
+  if (pthread_mutex_unlock(&client_list.list_mutex) != 0) {
+    fprintf(stderr, "Failed to unlock list_mutex\n");
+    if (write_all(client->fds[1], "21", MAX_RESPONSE_SIZE-1) == -1) {
+      fprintf(stderr, "Failed to send response\n");
+    }
+    return 1;
+  }
+
+  // Free client data
+  if (pthread_mutex_destroy(&client->keys_mutex) != 0) {
+    fprintf(stderr, "Failed to destroy keys_mutex\n");
+    if (write_all(client->fds[1], "21", MAX_RESPONSE_SIZE-1) == -1) {
+      fprintf(stderr, "Failed to send response\n");
+    }
+    return 1;
+  }
+
+  // Send response
+  if (write_all(client->fds[1], "20", MAX_RESPONSE_SIZE-1) == -1) {
+    fprintf(stderr, "Failed to send response\n");
+    return 1;
+  }
+
+  // Close pipes
+  close(client->fds[0]);
+  close(client->fds[1]);
+  close(client->fds[2]);
+
+  sem_post(&client_sem);
+  free(client);
+  return 0;
+}
 
 static int entry_files(const char* dir, struct dirent* entry, char* in_path, char* out_path) {
   const char* dot = strrchr(entry->d_name, '.');
@@ -75,7 +146,7 @@ static int run_job(int in_fd, int out_fd, char* filename) {
           continue;
         }
 
-        if (kvs_write(num_pairs, keys, values, clients)) {
+        if (kvs_write(num_pairs, keys, values)) {
           write_str(STDERR_FILENO, "Failed to write pair\n");
         }
         break;
@@ -101,7 +172,7 @@ static int run_job(int in_fd, int out_fd, char* filename) {
           continue;
         }
 
-        if (kvs_delete(num_pairs, keys, out_fd, clients)) {
+        if (kvs_delete(num_pairs, keys, out_fd)) {
           write_str(STDERR_FILENO, "Failed to delete pair\n");
         }
         break;
@@ -160,7 +231,7 @@ static int run_job(int in_fd, int out_fd, char* filename) {
         break;
 
       case EOC:
-        printf("EOF\n");
+        write_str(STDOUT_FILENO, "End of file\n");
         return 0;
     }
   }
@@ -233,71 +304,357 @@ static void* get_file(void* arguments) {
   pthread_exit(NULL);
 }
 
-int handle_message_client_connect(int fifo_fd, Client* client) {
-  char* client_pipes_names = read_msg(fifo_fd, MAX_PIPE_PATH_LENGTH*3 + 1);
-  if (client_pipes_names == NULL || add_client_info(regist_fifo, client_pipes_names, &client)) {
-    if (client != NULL) {
-      if (write_response(client->response_fifo, 1, CONNECT_INVALID) == 0) {
-        close(client->response_fifo);
-      }
-      free(client);
+void notify_clients(const char* key, const char* value) {
+  if (pthread_mutex_lock(&client_list.list_mutex) != 0) {
+    fprintf(stderr, "Failed to lock list_mutex. Could not notify clients\n");
+    return;
+  }
+
+  char notification[MAX_WRITE_SIZE_RESPONSE] = {0};
+
+  // Iterate over clients
+  struct ClientData* current = client_list.head;
+  while (current != NULL) {
+    if (pthread_mutex_lock(&current->keys_mutex) != 0) {
+      fprintf(stderr, "Failed to lock keys_mutex. Could not notify client.\n");
+      break;
     }
-    return 1;
+
+    for (int i = 0; i < current->num_keys; i++) {
+      if (strcmp(current->keys[i], key) == 0) {
+        if (value) {
+          snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%-40.40s,%-256.256s)", key, value);
+        } else {
+          snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%-40.40s,DELETED%-250.250s)", key, "");
+        }
+
+        if (write_all(current->fds[2], notification, MAX_WRITE_SIZE_RESPONSE-1) == -1) {
+          fprintf(stderr, "Failed to send notification\n");
+        }
+        break;
+      }
+    }
+
+    if (pthread_mutex_unlock(&current->keys_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock keys_mutex\n");
+      break;
+    }
+    current = current->next;
   }
-  if (write_response(client->response_fifo, 1, CONNECT_SUCCESS)) {
-    close_client_connection(client);
-    return 1;
+
+  if (pthread_mutex_unlock(&client_list.list_mutex) != 0) {
+    fprintf(stderr, "Failed to unlock list_mutex\n");
   }
-  return 0;
 }
 
-void* process_messages_from_client() {
-  int opcode;
-  Client* client = NULL;
-  int fifo_fd;
-  int regist_client = 0;
+// Callbacks for the clients
+void register_callbacks() {
+  register_write_callback(notify_clients);
+  register_delete_callback(notify_clients);
+}
+
+void* handle_client(void* arg) {
+  struct ClientData* data = (struct ClientData*)arg;
+  int request_fd = data->fds[0];
+  int response_fd = data->fds[1];
+
+  // Sucess on connection
+  if (write_all(response_fd, "10", MAX_RESPONSE_SIZE-1) == -1) {
+    fprintf(stderr, "Failed to send response\n");
+  }
+
+  // Add client to list
+  pthread_mutex_lock(&client_list.list_mutex);
+  data->next = client_list.head;
+  client_list.head = data;
+  pthread_mutex_unlock(&client_list.list_mutex);
+
+  char buffer[MAX_SIZE_OPCODE];
+  char key[MAX_STRING_SIZE + 1] = {0};
+  int result, key_exists, intr = 0;
+  
   while (1) {
-    fifo_fd = !regist_client ? regist_fifo : client->request_fifo;
-    opcode = read_opcode(fifo_fd);
-    if (opcode == -1) break; // PODE DAR ERRADO POR CAUSA DO EOF
-    if (!regist_client && opcode != '1') continue;
-    switch (opcode) {
-      case OP_CODE_CONNECT:
-        if (regist_client) continue;
-        if (handle_message_client_connect(fifo_fd, client)) {
-          return NULL;
+    // Read opcode from client
+    if ((result = read_all(request_fd, buffer, MAX_SIZE_OPCODE-1, &intr)) == -1) {
+      if (intr) {
+        fprintf(stderr, "Read was interrupted\n");
+        intr = 0;
+        if (client_disconnect(arg)) {
+          fprintf(stderr, "Failed to disconnect client\n");
         }
-        regist_client = 1;
-        break;
+      }
+      fprintf(stderr, "Failed to read from client\n");
+      break;
+    } else if (result == 0) {
+      break;
+    }
+
+    // Handle opcode
+    char op_code = buffer[0];
+    switch (op_code) {
       case OP_CODE_DISCONNECT:
-        close_client_connection(client);
-        return NULL;
+        if (client_disconnect(arg)) {
+          fprintf(stderr, "Failed to disconnect client\n");
+        }
+        pthread_exit(NULL);
+
       case OP_CODE_SUBSCRIBE:
-        char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-        if (key == NULL) {
-          close_client_connection(client);
-          return NULL;
+        // Parse key
+        if ((result = read_all(request_fd, key, MAX_STRING_SIZE+1, &intr)) == -1) {
+          if (intr) {
+            fprintf(stderr, "Read was interrupted\n");
+            intr = 0;
+            if (client_disconnect(arg)) {
+              fprintf(stderr, "Failed to disconnect client\n");
+            }
+          }
+          fprintf(stderr, "Failed to read key\n");
+          break;
+        } else if (result == 0) {
+          break;
         }
-        subscribe_key(client, key);
+        strtok(key, " ");
+
+        // 1st check: Key exists in KVS
+        if (kvs_key_exists(key)) {
+          if (write_all(response_fd, "31", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          break;
+        }
+
+        // 2nd check: Key is already subscribed or max number of subscriptions reached
+        if (pthread_mutex_lock(&data->keys_mutex) != 0) {
+          fprintf(stderr, "Failed to lock keys_mutex\n");
+          if (write_all(response_fd, "31", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          break;
+        }
+
+        key_exists = 0;
+        for (int i = 0; i < data->num_keys; i++) {
+          if (strcmp(data->keys[i], key) == 0) {
+            key_exists = 1;
+            break;
+          }
+        }
+
+        if (key_exists || data->num_keys > MAX_NUMBER_SUB) {
+          if (write_all(response_fd, "31", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          pthread_mutex_unlock(&data->keys_mutex);
+          break;
+        } else {
+          strncpy(data->keys[data->num_keys], key, MAX_STRING_SIZE);
+          data->num_keys++;
+        }
+        
+        if (pthread_mutex_unlock(&data->keys_mutex) != 0) {
+          fprintf(stderr, "Failed to unlock keys_mutex\n");
+          if (write_all(response_fd, "31", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          break;
+        }
+
+        // Send response of success
+        if (write_all(response_fd, "30", MAX_RESPONSE_SIZE-1) == -1) {
+          fprintf(stderr, "Failed to send response\n");
+        }
+
         break;
+
       case OP_CODE_UNSUBSCRIBE:
-        char* key = read_msg(fifo_fd, MAX_STRING_SIZE + 1);
-        if (key == NULL) {
-          close_client_connection(client);
-          return NULL;
+        if ((result = read_all(request_fd, key, MAX_STRING_SIZE+1, &intr)) == -1) {
+          if (intr) {
+            fprintf(stderr, "Read was interrupted\n");
+            intr = 0;
+            continue;
+          }
+          fprintf(stderr, "Failed to read key\n");
+          break;
+        } else if (result == 0) {
+          break; // TODO: Properly handle client disconnection
         }
-        unsubsribe_key(client, key);
+        strtok(key, " ");
+
+        // Check if key is subscribed and remove it
+        if (pthread_mutex_lock(&data->keys_mutex) != 0) {
+          fprintf(stderr, "Failed to lock keys_mutex\n");
+          if (write_all(response_fd, "31", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          break;
+        }
+
+        key_exists = 0;
+        for (int i = 0; i < data->num_keys; i++) {
+          if (strcmp(data->keys[i], key) == 0) {
+            key_exists = 1;
+            for (int j = i; j < data->num_keys - 1; j++) {
+              strncpy(data->keys[j], data->keys[j+1], MAX_STRING_SIZE+1); // Check later (SIZE)
+            }
+            data->num_keys--;
+            break;
+          }
+        }
+
+        if (pthread_mutex_unlock(&data->keys_mutex) != 0) {
+          fprintf(stderr, "Failed to unlock keys_mutex\n");
+          if (write_all(response_fd, "31", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          break;
+        }
+
+        write_all(response_fd, key_exists ? "40" : "41", MAX_RESPONSE_SIZE-1);
         break;
+      
       default:
-        fprintf(stderr, "Invalid Message OP_CODE\n");
+        fprintf(stderr, "Invalid opcode received: %c\n", op_code);
         break;
     }
   }
+
+  return NULL;
 }
+
+void* handle_fifo() {
+  int server_fd, intr, result;
+  char buffer[BUFFER_SIZE] = {0};
+  
+  while(1) {
+    // Open FIFO
+    server_fd = open(regist_fifo_name, O_RDONLY);
+    if (server_fd == -1) {
+      fprintf(stderr, "Failed to open main FIFO\n");
+      continue;
+    }
+
+    while(1) {
+      // Read from FIFO
+      result = read_all(server_fd, buffer, BUFFER_SIZE-1, &intr);
+      if (result == -1) {
+        if (intr) {
+          fprintf(stderr, "Read was interrupted\n");
+          intr = 0;
+          continue;
+        }
+        fprintf(stderr, "Failed to read from FIFO\n");
+        break;
+      } else if (result == 0) {
+        break;
+      }
+
+      char op_code = buffer[0];
+      if (op_code == OP_CODE_CONNECT) {
+        // Wait for client semaphore
+        sem_wait(&client_sem);
+
+        // Parse message
+        char request[MAX_STRING_SIZE + 1] = {0};
+        char response[MAX_STRING_SIZE + 1] = {0};
+        char notification[MAX_STRING_SIZE + 1] = {0};
+
+        strncpy(request, &buffer[1], MAX_STRING_SIZE);
+        strncpy(response, &buffer[1 + MAX_STRING_SIZE], MAX_STRING_SIZE);
+        strncpy(notification, &buffer[1 + 2 * MAX_STRING_SIZE], MAX_STRING_SIZE);
+        strtok(request, " ");
+        strtok(response, " ");
+        strtok(notification, " ");
+
+        // Open pipes
+        int client_fds[3];
+        if ((client_fds[0] = open(request, O_RDWR)) == -1) {
+          fprintf(stderr, "Failed to open request FIFO\n");
+          sem_post(&client_sem);
+          break;
+        }
+        if ((client_fds[1] = open(response, O_WRONLY)) == -1) {
+          fprintf(stderr, "Failed to open response FIFO\n");
+          close(client_fds[0]);
+          sem_post(&client_sem);
+          break;
+        }   
+        if ((client_fds[2] = open(notification, O_WRONLY)) == -1) {
+          fprintf(stderr, "Failed to open notification FIFO\n");
+          close(client_fds[0]);
+          close(client_fds[1]);
+          sem_post(&client_sem);
+          break;
+        }
+
+        // Allocate memory for client data
+        struct ClientData* client_data = malloc(sizeof(struct ClientData));
+        if (client_data == NULL) {
+          fprintf(stderr, "Failed to allocate memory for client data\n");
+          if (write_all(client_fds[1], "11", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          close(client_fds[0]);
+          close(client_fds[1]);
+          close(client_fds[2]);
+          sem_post(&client_sem);
+          break;
+        }
+        memcpy(client_data->fds, client_fds, sizeof(client_fds));
+        client_data->num_keys = 0;
+        if (pthread_mutex_init(&client_data->keys_mutex, NULL) != 0) {
+          fprintf(stderr, "Failed to initialize keys_mutex\n");
+          if (write_all(client_fds[1], "11", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          close(client_fds[0]);
+          close(client_fds[1]);
+          close(client_fds[2]);
+          free(client_data);
+          sem_post(&client_sem);
+          break;
+        }
+
+        // Thread to handle client
+        pthread_t client_thread;
+        if (pthread_create(&client_thread, NULL, handle_client, (void*)client_data) != 0) {
+          fprintf(stderr, "Failed to create client thread\n");
+          if (write_all(client_fds[1], "11", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          close(client_fds[0]);
+          close(client_fds[1]);
+          close(client_fds[2]);
+          free(client_data);
+          sem_post(&client_sem);
+          break;
+        }
+
+        // Detach thread
+        if (pthread_detach(client_thread) != 0) {
+          fprintf(stderr, "Failed to detach client thread\n");
+          if (write_all(client_fds[1], "11", MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+          }
+          close(client_fds[0]);
+          close(client_fds[1]);
+          close(client_fds[2]);
+          free(client_data);
+          sem_post(&client_sem);
+          break;
+        }
+      }
+    }
+
+    close(server_fd);
+  }
+
+  return NULL;
+}
+
 
 static void dispatch_threads(DIR* dir) {
   pthread_t* threads = malloc(max_threads * sizeof(pthread_t));
-
+  
   if (threads == NULL) {
     fprintf(stderr, "Failed to allocate memory for threads\n");
     return;
@@ -305,23 +662,27 @@ static void dispatch_threads(DIR* dir) {
 
   struct SharedData thread_data = {dir, jobs_directory, PTHREAD_MUTEX_INITIALIZER};
 
-
   for (size_t i = 0; i < max_threads; i++) {
     if (pthread_create(&threads[i], NULL, get_file, (void*)&thread_data) != 0) {
-      fprintf(stderr, "Failed to create thread %zu\n", i);
+      fprintf(stderr, "Failed to create thread %lu\n", i);
       pthread_mutex_destroy(&thread_data.directory_mutex);
       free(threads);
       return;
     }
   }
 
-  pthread_t client_thread;
-  if (pthread_create(&client_thread, NULL, process_messages_from_client, NULL) != 0) {
-    fprintf(stderr, "Failed to create client thread\n");
+  // Start register callbacks
+  register_callbacks();
+
+  // Create FIFO handling thread
+  pthread_t fifo_thread;
+  if (pthread_create(&fifo_thread, NULL, handle_fifo, NULL) != 0) {
+    fprintf(stderr, "Failed to create FIFO handling thread\n");
     pthread_mutex_destroy(&thread_data.directory_mutex);
     free(threads);
     return;
   }
+
 
   for (unsigned int i = 0; i < max_threads; i++) {
     if (pthread_join(threads[i], NULL) != 0) {
@@ -336,6 +697,11 @@ static void dispatch_threads(DIR* dir) {
     fprintf(stderr, "Failed to destroy directory_mutex\n");
   }
 
+  // Wait for the FIFO handling thread to finish
+  if (pthread_join(fifo_thread, NULL) != 0) {
+    fprintf(stderr, "Failed to join FIFO handling thread\n");
+  }
+
   free(threads);
 }
 
@@ -346,8 +712,8 @@ int main(int argc, char** argv) {
     write_str(STDERR_FILENO, argv[0]);
     write_str(STDERR_FILENO, " <jobs_dir>");
 		write_str(STDERR_FILENO, " <max_threads>");
-		write_str(STDERR_FILENO, " <max_backups> \n");
-    write_str(STDERR_FILENO, " <nome_do_FIFO_de_registo> \n");
+		write_str(STDERR_FILENO, " <max_backups>");
+    write_str(STDERR_FILENO, " <fifo_name>\n");
     return 1;
   }
 
@@ -377,9 +743,6 @@ int main(int argc, char** argv) {
 		write_str(STDERR_FILENO, "Invalid number of threads\n");
 		return 0;
 	}
-  
-  snprintf(regist_fifo_name_path, MAX_PIPE_PATH_LENGTH+5+1, "%s%s", TEMP_FOLDER, argv[4]);
-  fprintf(stderr, "%s\n", regist_fifo_name_path);
 
   if (kvs_init()) {
     write_str(STDERR_FILENO, "Failed to initialize KVS\n");
@@ -392,18 +755,14 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  // Create FIFO
-  if (mkfifo(regist_fifo_name_path, 0777) < 0) {
-    if (errno == EEXIST) {
-      write_str(STDERR_FILENO, "FIFO already exists\n");
-    } else {
-      write_str(STDERR_FILENO, "Failed to create FIFO\n");
-      return 1;
-    }
+  // Handle fifo
+  snprintf(regist_fifo_name, MAX_STRING_SIZE, "%s%s", TEMP_FOLDER, argv[4]);
+  if (fifo_init(regist_fifo_name)) {
+    write_str(STDERR_FILENO, "Failed to initialize fifo\n");
+    return 1;
   }
-  regist_fifo = open(regist_fifo_name_path, O_RDONLY | O_NONBLOCK);
-  if (regist_fifo < 0) {
-    write_str(STDERR_FILENO, "Failed to open FIFO\n");
+  if (sem_init(&client_sem, 0, MAX_SESSION_COUNT) == -1) {
+    write_str(STDERR_FILENO, "Failed to initialize semaphore\n");
     return 1;
   }
 
@@ -419,9 +778,9 @@ int main(int argc, char** argv) {
     active_backups--;
   }
 
+  // Terminate server
   kvs_terminate();
-  close(regist_fifo);
+  unlink(regist_fifo_name);
+  sem_destroy(&client_sem);
   return 0;
 }
-
-
