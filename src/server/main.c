@@ -39,7 +39,7 @@ struct ClientList {
   pthread_mutex_t list_mutex;
 };
 
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t kvs_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
 
 size_t active_backups = 0;     // Number of active backups
@@ -47,9 +47,74 @@ size_t max_backups;            // Maximum allowed simultaneous backups
 size_t max_threads;            // Maximum allowed simultaneous threads
 char* jobs_directory = NULL;
 
-char regist_fifo_name[MAX_STRING_SIZE]; // Name of the FIFO
+char regist_fifo_name[MAX_PIPE_PATH_LENGTH]; // Name of the FIFO
 sem_t client_sem; // Semaphore to control the number of threads
 struct ClientList client_list = {NULL, PTHREAD_MUTEX_INITIALIZER}; // List of clients
+
+void handle_sigusr1(int) {
+  // Block more SIGUSR1 signals
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGUSR1);
+  sigprocmask(SIG_BLOCK, &set, NULL);
+
+  // Lock the KVS mutex to block run_job threads
+  if (pthread_mutex_lock(&kvs_lock) != 0) {
+    fprintf(stderr, "Failed to lock kvs_lock\n");
+    return;
+  }
+
+  if (pthread_mutex_lock(&client_list.list_mutex) != 0) {
+    fprintf(stderr, "Failed to lock list_mutex\n");
+    pthread_mutex_unlock(&kvs_lock);
+    return;
+  }
+
+  struct ClientData* current = client_list.head;
+  struct ClientData* temp;
+
+  // Iterate over the client list and free all clients
+  while (current != NULL) {
+    for (int i = 0; i < 3; i++) {
+      close(current->fds[i]);
+      current->fds[i] = -1;
+    }
+
+    if (pthread_mutex_destroy(&current->keys_mutex) != 0) {
+      fprintf(stderr, "Failed to destroy keys_mutex\n");
+    }
+
+    // Free the client data structure
+    temp = current;
+    current = current->next;
+    free(temp);
+  }
+  client_list.head = NULL;
+
+  // Unlock the list mutex
+  if (pthread_mutex_unlock(&client_list.list_mutex) != 0) {
+    fprintf(stderr, "Failed to unlock list_mutex\n");
+  }
+
+  // Destroy and reinitialize the client semaphore
+  if (sem_destroy(&client_sem) == -1) {
+    fprintf(stderr, "Failed to destroy semaphore\n");
+  }
+  if (sem_init(&client_sem, 0, MAX_SESSION_COUNT) == -1) {
+    fprintf(stderr, "Failed to initialize semaphore\n");
+  }
+
+  // Terminate and reinitialize the KVS
+  kvs_terminate();
+  kvs_init();
+
+  // Unlock the KVS mutex
+  if (pthread_mutex_unlock(&kvs_lock) != 0) {
+    fprintf(stderr, "Failed to unlock kvs_lock\n");
+  }
+
+  sigprocmask(SIG_UNBLOCK, &set, NULL);
+}
 
 static int client_disconnect(struct ClientData* client) {
   // Remove client from list
@@ -325,12 +390,17 @@ void notify_clients(const char* key, const char* value) {
         if (value) {
           snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%-40.40s,%-256.256s)", key, value);
         } else {
-          snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%-40.40s,DELETED%-250.250s)", key, "");
+          snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%-40.40s,DELETED%-249.249s)", key, "");
+        }
+        
+        if (current->fds[2] == -1) {
+          break;
         }
 
         if (write_all(current->fds[2], notification, MAX_WRITE_SIZE_RESPONSE-1) == -1) {
           fprintf(stderr, "Failed to send notification\n");
         }
+
         break;
       }
     }
@@ -354,6 +424,12 @@ void register_callbacks() {
 }
 
 void* handle_client(void* arg) {
+  // Block SIGUSR1 in this thread
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGUSR1);
+  pthread_sigmask(SIG_BLOCK, &set, NULL);
+
   struct ClientData* data = (struct ClientData*)arg;
   int request_fd = data->fds[0];
   int response_fd = data->fds[1];
@@ -379,18 +455,16 @@ void* handle_client(void* arg) {
       if (intr) {
         fprintf(stderr, "Read was interrupted\n");
         intr = 0;
-        if (client_disconnect(arg)) {
-          fprintf(stderr, "Failed to disconnect client\n");
-        }
       }
       fprintf(stderr, "Failed to read from client\n");
-      break;
+      continue;
     } else if (result == 0) {
+      sem_post(&client_sem);
       break;
     }
 
     // Handle opcode
-    char op_code = buffer[0];
+    char op_code = buffer[0] - '0';
     switch (op_code) {
       case OP_CODE_DISCONNECT:
         if (client_disconnect(arg)) {
@@ -408,7 +482,6 @@ void* handle_client(void* arg) {
               fprintf(stderr, "Failed to disconnect client\n");
             }
           }
-          fprintf(stderr, "Failed to read key\n");
           break;
         } else if (result == 0) {
           break;
@@ -513,7 +586,7 @@ void* handle_client(void* arg) {
         break;
       
       default:
-        fprintf(stderr, "Invalid opcode received: %c\n", op_code);
+        fprintf(stderr, "Invalid opcode received: %c\n", buffer[0]);
         break;
     }
   }
@@ -522,6 +595,19 @@ void* handle_client(void* arg) {
 }
 
 void* handle_fifo() {
+  // Configurar máscara de sinais para esta thread
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGUSR1);
+  pthread_sigmask(SIG_UNBLOCK, &set, NULL);  // Apenas esta thread recebe SIGUSR1
+
+  // Configurar handler SIGUSR1
+  struct sigaction sa;
+  sa.sa_handler = handle_sigusr1;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGUSR1, &sa, NULL);
+
   int server_fd, intr, result;
   char buffer[BUFFER_SIZE] = {0};
   
@@ -548,7 +634,7 @@ void* handle_fifo() {
         break;
       }
 
-      char op_code = buffer[0];
+      char op_code = buffer[0] - '0';
       if (op_code == OP_CODE_CONNECT) {
         // Wait for client semaphore
         sem_wait(&client_sem);
@@ -756,7 +842,7 @@ int main(int argc, char** argv) {
   }
 
   // Handle fifo
-  snprintf(regist_fifo_name, MAX_STRING_SIZE, "%s%s", TEMP_FOLDER, argv[4]);
+  snprintf(regist_fifo_name, MAX_PIPE_PATH_LENGTH, "%s%s", TEMP_FOLDER, argv[4]);
   if (fifo_init(regist_fifo_name)) {
     write_str(STDERR_FILENO, "Failed to initialize fifo\n");
     return 1;

@@ -6,5 +6,3 @@ src/server/jobs
 *.o
 *.out
 .vscode
-.clang-format
-.DS_Store

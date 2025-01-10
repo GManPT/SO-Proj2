@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <unistd.h>
 
 static char req_path[MAX_PIPE_PATH_LENGTH];
@@ -17,9 +18,13 @@ static char notif_path[MAX_PIPE_PATH_LENGTH];
 static int request_fd = -1;
 static int response_fd = -1;
 static int notification_fd = -1;
+static int disconnect_flag = 0;
 
 int kvs_disconnect() {
   int result, intr = 0;
+  if (!disconnect_flag) {
+    disconnect_flag = 1;
+  }
 
   // Send disconnect message
   if (write_all(request_fd, "2", 1) == -1) {
@@ -106,14 +111,14 @@ int kvs_connect(char const* req_pipe_path, char const* resp_pipe_path, char cons
     close(server_fd);
     return 1;
   }
-  response_fd = open(resp_path, O_RDWR);
+  response_fd = open(resp_path, O_RDONLY);
   if (response_fd == -1) {
     fprintf(stderr, "Failed to open response pipe\n");
     close(request_fd);
     close(server_fd);
     return 1;
   }
-  notification_fd = open(notif_path, O_RDWR);
+  notification_fd = open(notif_path, O_RDONLY);
   if (notification_fd == -1) {
     fprintf(stderr, "Failed to open notification pipe\n");
     close(request_fd);
@@ -134,6 +139,7 @@ int kvs_connect(char const* req_pipe_path, char const* resp_pipe_path, char cons
     close(request_fd);
     close(response_fd);
     close(notification_fd);
+    close(server_fd);
     return 1;
   }
 
@@ -234,6 +240,14 @@ void* kvs_notifications(void* arg) {
         }
       } else {
         fprintf(stderr, "Failed to read from notification pipe\n");
+      }
+      return NULL;
+    } else if (result == 0) {
+      if (disconnect_flag) {
+        break;
+      }
+      if (kvs_disconnect()) {
+        fprintf(stderr, "Failed to disconnect\n");
       }
       return NULL;
     }
