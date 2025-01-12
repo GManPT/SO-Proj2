@@ -80,7 +80,7 @@ int remove_key(IntHashTable *ht, const char *key, int value) {
     return 1;
 }
 
-int* get_keys(IntHashTable *ht, const char *key, int *count) {
+int* get_fds(IntHashTable *ht, const char *key, int *count) {
     unsigned int index = chash(key);
 
     pthread_rwlock_rdlock(&ht->tableLock);

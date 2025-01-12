@@ -31,10 +31,21 @@ int main(int argc, char *argv[]) {
   strncat(notif_pipe_path, argv[1], strlen(argv[1]) * sizeof(char));
   strncat(server_pipe_path, argv[2], strlen(argv[2]) * sizeof(char));
 
+  // Connect to the server
   if (kvs_connect(req_pipe_path, resp_pipe_path, server_pipe_path,
                   notif_pipe_path) != 0) {
     fprintf(stderr, "Failed to connect to the server\n");
     return 1;
+  }
+
+  // Start notifications thread
+  pthread_t notifications_thread;
+  if (pthread_create(&notifications_thread, NULL, kvs_notifications, NULL) != 0) {
+    fprintf(stderr, "Failed to create notifications thread\n");
+    if (kvs_disconnect() != 0) {
+      fprintf(stderr, "Failed to disconnect to the server\n");
+      return 1;
+    }
   }
 
   while (1) {
@@ -44,7 +55,12 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to disconnect to the server\n");
         return 1;
       }
-      // TODO: end notifications thread
+      
+      if (pthread_cancel(notifications_thread) != 0) {
+        fprintf(stderr, "Failed to cancel notifications thread\n");
+        return 1;
+      }
+      
       fprintf(stdout, "Disconnected from server\n");
       return 0;
 

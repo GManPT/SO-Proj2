@@ -16,6 +16,18 @@
 
 static struct HashTable *kvs_table = NULL;
 
+// Define the callback functions
+static kvs_callback_t write_callback = NULL;
+static kvs_callback_t delete_callback = NULL;
+
+void register_write_callback(kvs_callback_t callback) {
+  write_callback = callback;
+}
+
+void register_delete_callback(kvs_callback_t callback) {
+  delete_callback = callback;
+}
+
 /// Calculates a timespec from a delay in milliseconds.
 /// @param delay_ms Delay in milliseconds.
 /// @return Timespec with the given delay.
@@ -54,8 +66,19 @@ int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE],
   pthread_rwlock_wrlock(&kvs_table->tablelock);
 
   for (size_t i = 0; i < num_pairs; i++) {
+    // Compare if old value is different from new value
+    char *old_value = read_pair(kvs_table, keys[i]);
+    if (old_value != NULL && strcmp(old_value, values[i]) == 0) {
+      free(old_value);
+      continue;
+    }
+
     if (write_pair(kvs_table, keys[i], values[i]) != 0) {
       fprintf(stderr, "Failed to write key pair (%s,%s)\n", keys[i], values[i]);
+    }
+
+    if (write_callback != NULL) {
+      write_callback(keys[i], values[i]);
     }
   }
 
@@ -107,6 +130,10 @@ int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
       char str[MAX_STRING_SIZE];
       snprintf(str, MAX_STRING_SIZE, "(%s,KVSMISSING)", keys[i]);
       write_str(fd, str);
+    }
+
+    if (delete_callback != NULL) {
+      delete_callback(keys[i], NULL);
     }
   }
   if (aux) {

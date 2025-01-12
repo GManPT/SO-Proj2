@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "client.h"
+#include "constants.h"
 #include "coperations.h"
 #include "operations.h"
 #include "../common/io.h"
@@ -43,6 +44,37 @@ void print_client_keys(ClientData* client_data) {
         printf("%s%s", client_data->keys[i], i < client_data->num_keys - 1 ? ", " : "");
     }
     printf("]\n");
+}
+
+void notify_clients(const char* key, const char* value) {
+    int count;
+    int* notify_fds = get_fds(subscribed_keys, key, &count);
+    if (!notify_fds) {
+        return;
+    }
+    char notification[MAX_WRITE_SIZE_RESPONSE] = {0};
+
+    // Iterate over the fds and send the notification
+    for (int i = 0; i < count; i++) {
+        if (value) {
+            memset(notification, '\0', MAX_WRITE_SIZE_RESPONSE);
+            snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%.*s,%.*s)", MAX_STRING_SIZE, key, MAX_WRITE_SIZE, value);
+        } else {
+            memset(notification, '\0', MAX_WRITE_SIZE_RESPONSE);
+            snprintf(notification, MAX_WRITE_SIZE_RESPONSE, "(%.*s,DELETED%.*s)", MAX_STRING_SIZE, key, MAX_WRITE_SIZE-7, "");
+        }
+
+        if (write_all(notify_fds[i], notification, MAX_WRITE_SIZE_RESPONSE-1) == -1) {
+            fprintf(stderr, "Failed to send notification\n");
+        }
+    }
+    
+}
+
+
+void register_callbacks() {
+    register_write_callback(notify_clients);
+    register_delete_callback(notify_clients);
 }
 
 void disconnect_client(ClientData* client_data) {
@@ -233,6 +265,8 @@ int start_client_threads() {
         fprintf(stderr, "Failed to create hash table\n");
         return 1;
     }
+
+    register_callbacks();
 
     for (int i = 0; i < MAX_SESSION_COUNT; i++) {
         // Create a new thread structure

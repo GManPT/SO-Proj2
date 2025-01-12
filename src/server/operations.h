@@ -5,6 +5,11 @@
 
 #include "constants.h"
 
+// Callback function type for key value pairs.
+// @param key Key of the pair.
+// @param value Value of the pair.
+typedef void (*kvs_callback_t)(const char* key, const char* value);
+
 /// Initializes the KVS state.
 /// @return 0 if the KVS state was initialized successfully, 1 otherwise.
 int kvs_init();
@@ -75,5 +80,10 @@ void trim_trailing_whitespace(char *str);
 // @param key Key to check.
 // @return 0 if the key exists, 1 otherwise.
 int kvs_key_exists(const char* key);
+
+// Calls the callback function for the given key and value
+// @param callback Callback function to be called
+void register_write_callback(kvs_callback_t callback);
+void register_delete_callback(kvs_callback_t callback); 
 
 #endif // KVS_OPERATIONS_H

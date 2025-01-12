@@ -9,3 +9,4 @@
 #define MAX_RESPONSE_SIZE 3 // tamanho max da resposta
 #define MAX_SIZE_OPCODE 2 // tamanho max do opcode
 #define BUFFER_SIZE_UNS 43 // tamanho do buffer para unsubscribe
+#define MAX_WRITE_SIZE_RESPONSE 301 // MAX_WRITE_SIZE + MAX_STRING_SIZE + , + ( + ) + \0

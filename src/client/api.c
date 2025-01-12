@@ -18,8 +18,13 @@ static int request_fd = -1;
 static int response_fd = -1;
 static int notification_fd = -1;
 
+int disconnect = 0;
+
 int kvs_disconnect(void) {
   int result, intr = 0;
+
+  if (disconnect) return 0;
+  else disconnect = 1;
   
   // Send disconnect message
   char message[MAX_SIZE_OPCODE] = {OP_CODE_DISCONNECT + '0', '\0'};
@@ -248,4 +253,61 @@ int kvs_unsubscribe(const char *key) {
   char responsev = response[1] - '0';
   fprintf(stdout, "Server returned %d for operation: unsubscribe\n", responsev);
   return responsev == OP_CODE_OK_CDU ? 0 : 1;
+}
+
+void print_notification(const char* notification, size_t length) {
+  // Create a printable string
+  char printable_notification[length + 1];
+  strncpy(printable_notification, notification, length);
+  printable_notification[length] = '\0';
+
+  for (size_t i = 0; i < length; i++) {
+    if (printable_notification[i] == '\0') {
+      printable_notification[i] = ' ';
+    }
+  }
+
+  for (size_t i = length; i > 0; i--) {
+    if (printable_notification[i - 1] != ' ') {
+      printable_notification[i] = '\0';
+      break;
+    }
+  }
+
+  write_str(STDOUT_FILENO, printable_notification);
+  write_str(STDOUT_FILENO, "\n");
+}
+
+void* kvs_notifications(void* arg) {
+  (void)arg;
+  int result, intr = 0;
+
+  if (notification_fd == -1) {
+    fprintf(stderr, "Not connected to server\n");
+    return NULL;
+  }
+
+  // Read notifications
+  char notification[MAX_WRITE_SIZE_RESPONSE] = {0};
+  while(1) {
+    if ((result = read_all(notification_fd, notification, MAX_WRITE_SIZE_RESPONSE - 1, &intr)) == -1) {
+      if (intr) {
+        fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+        if (kvs_disconnect()) {
+          fprintf(stderr, "Failed to disconnect\n");
+        }
+        return NULL;
+      }
+      fprintf(stderr, "Failed to read from notification pipe\n");
+    } else if (result == 0) {
+      fprintf(stderr, "Server disconnected\n");
+      if (kvs_disconnect()) {
+        fprintf(stderr, "Failed to disconnect\n");
+      }
+      return NULL;
+    }
+
+    // Print notification
+    print_notification(notification, MAX_WRITE_SIZE_RESPONSE);
+  }
 }

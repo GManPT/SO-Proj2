@@ -48,7 +48,7 @@ int remove_key(IntHashTable *ht, const char *key, int value);
 /// @param key Key to search
 /// @param count Number of values found
 /// @return An array of values, NULL on failure
-int* get_keys(IntHashTable *ht, const char *key, int *count);
+int* get_fds(IntHashTable *ht, const char *key, int *count);
 
 /// Get the index of a key in the list
 /// @param key Key to search
