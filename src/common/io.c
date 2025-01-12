@@ -63,6 +63,9 @@ int write_all(int fd, const void *buffer, size_t size) {
         // PIPE)
         continue;
       }
+      if (errno == EPIPE) {
+        return -1;
+      }
       perror("Failed to write to pipe");
       return -1;
     }

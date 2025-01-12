@@ -71,16 +71,16 @@ void notify_clients(const char* key, const char* value) {
     
 }
 
-
 void register_callbacks() {
     register_write_callback(notify_clients);
     register_delete_callback(notify_clients);
 }
 
-void disconnect_client(ClientData* client_data) {
+void disconnect_client(ClientData* client_data, int cdisconnected) {
     char response_wrong[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
     char response_right[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_OK_CDU + '0', '\0'};
     int fail = 0;
+    
     if (client_data->fds[0] >= 0 && close(client_data->fds[0]) == -1) {
         fprintf(stderr, "Failed to close request pipe\n");
         fail = 1;
@@ -89,8 +89,11 @@ void disconnect_client(ClientData* client_data) {
         fprintf(stderr, "Failed to close notification pipe\n");
         fail = 1;
     }
-    if (write_all(client_data->fds[1], fail ? response_wrong : response_right, MAX_RESPONSE_SIZE-1) == -1) {
-        fprintf(stderr, "Failed to send response\n");
+
+    if (!cdisconnected) {
+        if (write_all(client_data->fds[1], fail ? response_wrong : response_right, MAX_RESPONSE_SIZE-1) == -1) {
+            fprintf(stderr, "Failed to send response\n");
+        }
     }
     if (client_data->fds[1] >= 0 && close(client_data->fds[1]) == -1) {
         fprintf(stderr, "Failed to close response pipe\n");
@@ -156,7 +159,7 @@ void client_unsubscribe_key(ClientData* client_data, const char* key) {
 
 void *client_thread(void *data) {
     ClientData *client_data = (ClientData *)data;
-    int result, intr = 0, disconnect = 0;
+    int result, intr = 0, disconnect = 0, fail = 0;
 
     // Buffer for reading from pipe
     char buffer[MAX_SIZE_OPCODE] = {0};
@@ -190,12 +193,13 @@ void *client_thread(void *data) {
                 if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
                     fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
                 }
-                disconnect_client(client_data);
+                disconnect_client(client_data, fail);
                 if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
                     fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", client_data->thread_id);
                 }
 
                 disconnect = 0;
+                fail = 0;
                 break;
             }
 
@@ -205,20 +209,23 @@ void *client_thread(void *data) {
                     fprintf(stderr, "Read was interrupted\n");
                     intr = 0;
                     disconnect = 1;
-                    break;
+                    fail = 1;
+                    continue;
                 }
                 fprintf(stderr, "Failed to read from request pipe\n");
             } else if (result == 0) {
                 // Client disconnected
                 fprintf(stderr, "Client disconnected\n");
                 disconnect = 1;
-                break;
+                fail = 1;
+                continue;
             }
 
             char op_code = buffer[0] - '0';
             switch (op_code) {
                 case OP_CODE_DISCONNECT:
                     disconnect = 1;
+                    fail = 0;
                     break;
                 
                 case OP_CODE_UNSUBSCRIBE:
@@ -228,11 +235,13 @@ void *client_thread(void *data) {
                             fprintf(stderr, "Read was interrupted\n");
                             intr = 0;
                             disconnect = 1;
+                            fail = 1;
                             break;
                         }
                     } else if (result == 0) {
                         fprintf(stderr, "Client disconnected\n");
                         disconnect = 1;
+                        fail = 1;
                         break;
                     }
                             

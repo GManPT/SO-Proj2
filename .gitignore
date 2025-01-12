@@ -1,5 +1,6 @@
 src/server/kvs
 src/server/jobs
+src/client/client
 *.o
 *.out
 .vscode
