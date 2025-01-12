@@ -2,12 +2,8 @@
 #define KVS_OPERATIONS_H
 
 #include <stddef.h>
-#include "constants.h"
 
-// Callback function type for key value pairs.
-// @param key Key of the pair.
-// @param value Value of the pair.
-typedef void (*kvs_callback_t)(const char* key, const char* value);
+#include "constants.h"
 
 /// Initializes the KVS state.
 /// @return 0 if the KVS state was initialized successfully, 1 otherwise.
@@ -22,7 +18,8 @@ int kvs_terminate();
 /// @param keys Array of keys' strings.
 /// @param values Array of values' strings.
 /// @return 0 if the pairs were written successfully, 1 otherwise.
-int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE], char values[][MAX_STRING_SIZE]);
+int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE],
+              char values[][MAX_STRING_SIZE]);
 
 /// Reads values from the KVS.
 /// @param num_pairs Number of pairs to read.
@@ -44,7 +41,7 @@ void kvs_show(int fd);
 /// Creates a backup of the KVS state and stores it in the correspondent
 /// backup file
 /// @return 0 if the backup was successful, 1 otherwise.
-int kvs_backup(size_t num_backup,char* job_filename , char* directory);
+int kvs_backup(size_t num_backup, char *job_filename, char *directory);
 
 /// Waits for the last backup to be called.
 void kvs_wait_backup();
@@ -70,14 +67,13 @@ int get_n_current_backups();
 // @return 0 if the fifo was initialized successfully, 1 otherwise.
 int fifo_init(char* fifo_name);
 
+// Removes white spaces from the end of a string.
+// @param str String to remove white spaces from.
+void trim_trailing_whitespace(char *str);
+
 // Checks if a key exists in the KVS.
 // @param key Key to check.
 // @return 0 if the key exists, 1 otherwise.
-int kvs_key_exists(char* key);
+int kvs_key_exists(const char* key);
 
-// Calls the callback function for the given key and value
-// @param callback Callback function to be called
-void register_write_callback(kvs_callback_t callback);
-void register_delete_callback(kvs_callback_t callback); 
-
-#endif  // KVS_OPERATIONS_H
+#endif // KVS_OPERATIONS_H

@@ -1,4 +1,5 @@
 #include "io.h"
+
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -6,9 +7,9 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
 #include "src/common/constants.h"
- 
- 
+
 int read_all(int fd, void *buffer, size_t size, int *intr) {
   if (intr != NULL && *intr) {
     return -1;
@@ -35,7 +36,7 @@ int read_all(int fd, void *buffer, size_t size, int *intr) {
   }
   return 1;
 }
- 
+
 int read_string(int fd, char *str) {
   ssize_t bytes_read = 0;
   char ch;
@@ -51,14 +52,15 @@ int read_string(int fd, char *str) {
   str[bytes_read] = '\0';
   return (int)bytes_read;
 }
- 
+
 int write_all(int fd, const void *buffer, size_t size) {
   size_t bytes_written = 0;
   while (bytes_written < size) {
     ssize_t result = write(fd, buffer + bytes_written, size - bytes_written);
     if (result == -1) {
       if (errno == EINTR) {
-        // error for broken PIPE (error associated with writting to the closed PIPE)
+        // error for broken PIPE (error associated with writting to the closed
+        // PIPE)
         continue;
       }
       perror("Failed to write to pipe");
@@ -87,12 +89,10 @@ void write_str(int fd, const char *str) {
 }
 
 static struct timespec delay_to_timespec(unsigned int delay_ms) {
-    return (struct timespec){delay_ms / 1000, (delay_ms % 1000) * 1000000};
+  return (struct timespec){delay_ms / 1000, (delay_ms % 1000) * 1000000};
 }
 
 void delay(unsigned int time_ms) {
-    struct timespec delay = delay_to_timespec(time_ms);
-    nanosleep(&delay, NULL);
+  struct timespec delay = delay_to_timespec(time_ms);
+  nanosleep(&delay, NULL);
 }
-
-

@@ -1,31 +1,20 @@
+#include "operations.h"
+
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <ctype.h>
 
 #include "constants.h"
 #include "io.h"
-#include "src/common/io.h"
 #include "kvs.h"
-#include "operations.h"
 
 static struct HashTable *kvs_table = NULL;
-
-// Define the callback functions
-static kvs_callback_t write_callback = NULL;
-static kvs_callback_t delete_callback = NULL;
-
-void register_write_callback(kvs_callback_t callback) {
-  write_callback = callback;
-}
-
-void register_delete_callback(kvs_callback_t callback) {
-  delete_callback = callback;
-}
 
 /// Calculates a timespec from a delay in milliseconds.
 /// @param delay_ms Delay in milliseconds.
@@ -65,20 +54,8 @@ int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE],
   pthread_rwlock_wrlock(&kvs_table->tablelock);
 
   for (size_t i = 0; i < num_pairs; i++) {
-    // Compare if old value is different from new value
-    char *old_value = read_pair(kvs_table, keys[i]);
-    if (old_value != NULL && strcmp(old_value, values[i]) == 0) {
-      free(old_value);
-      continue;
-    }
-
     if (write_pair(kvs_table, keys[i], values[i]) != 0) {
       fprintf(stderr, "Failed to write key pair (%s,%s)\n", keys[i], values[i]);
-      continue;
-    }
-
-    if (write_callback != NULL) {
-      write_callback(keys[i], values[i]);
     }
   }
 
@@ -91,7 +68,7 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
     fprintf(stderr, "KVS state must be initialized\n");
     return 1;
   }
-  
+
   pthread_rwlock_rdlock(&kvs_table->tablelock);
 
   write_str(fd, "[");
@@ -107,7 +84,7 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
     free(result);
   }
   write_str(fd, "]\n");
-  
+
   pthread_rwlock_unlock(&kvs_table->tablelock);
   return 0;
 }
@@ -130,11 +107,6 @@ int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
       char str[MAX_STRING_SIZE];
       snprintf(str, MAX_STRING_SIZE, "(%s,KVSMISSING)", keys[i]);
       write_str(fd, str);
-      continue;
-    }
-
-    if (delete_callback != NULL) {
-      delete_callback(keys[i], NULL);
     }
   }
   if (aux) {
@@ -150,14 +122,15 @@ void kvs_show(int fd) {
     fprintf(stderr, "KVS state must be initialized\n");
     return;
   }
-  
+
   pthread_rwlock_rdlock(&kvs_table->tablelock);
   char aux[MAX_STRING_SIZE];
-  
+
   for (int i = 0; i < TABLE_SIZE; i++) {
     KeyNode *keyNode = kvs_table->table[i]; // Get the next list head
     while (keyNode != NULL) {
-      snprintf(aux, MAX_STRING_SIZE, "(%s, %s)\n", keyNode->key, keyNode->value);
+      snprintf(aux, MAX_STRING_SIZE, "(%s, %s)\n", keyNode->key,
+               keyNode->value);
       write_str(fd, aux);
       keyNode = keyNode->next; // Move to the next node of the list
     }
@@ -166,11 +139,11 @@ void kvs_show(int fd) {
   pthread_rwlock_unlock(&kvs_table->tablelock);
 }
 
-int kvs_backup(size_t num_backup,char* job_filename , char* directory) {
+int kvs_backup(size_t num_backup, char *job_filename, char *directory) {
   pid_t pid;
   char bck_name[50];
-  snprintf(bck_name, sizeof(bck_name), "%s/%s-%ld.bck", directory, strtok(job_filename, "."),
-           num_backup);
+  snprintf(bck_name, sizeof(bck_name), "%s/%s-%ld.bck", directory,
+           strtok(job_filename, "."), num_backup);
 
   pthread_rwlock_rdlock(&kvs_table->tablelock);
   pid = fork();
@@ -186,14 +159,14 @@ int kvs_backup(size_t num_backup,char* job_filename , char* directory) {
         aux[0] = '(';
         size_t num_bytes_copied = 1; // the "("
         // the - 1 are all to leave space for the '/0'
-        num_bytes_copied += strn_memcpy(aux + num_bytes_copied,
-                                        keyNode->key, MAX_STRING_SIZE - num_bytes_copied - 1);
-        num_bytes_copied += strn_memcpy(aux + num_bytes_copied,
-                                        ", ", MAX_STRING_SIZE - num_bytes_copied - 1);
-        num_bytes_copied += strn_memcpy(aux + num_bytes_copied,
-                                        keyNode->value, MAX_STRING_SIZE - num_bytes_copied - 1);
-        num_bytes_copied += strn_memcpy(aux + num_bytes_copied,
-                                        ")\n", MAX_STRING_SIZE - num_bytes_copied - 1);
+        num_bytes_copied += strn_memcpy(aux + num_bytes_copied, keyNode->key,
+                                        MAX_STRING_SIZE - num_bytes_copied - 1);
+        num_bytes_copied += strn_memcpy(aux + num_bytes_copied, ", ",
+                                        MAX_STRING_SIZE - num_bytes_copied - 1);
+        num_bytes_copied += strn_memcpy(aux + num_bytes_copied, keyNode->value,
+                                        MAX_STRING_SIZE - num_bytes_copied - 1);
+        num_bytes_copied += strn_memcpy(aux + num_bytes_copied, ")\n",
+                                        MAX_STRING_SIZE - num_bytes_copied - 1);
         aux[num_bytes_copied] = '\0';
         write_str(fd, aux);
         keyNode = keyNode->next; // Move to the next node of the list
@@ -218,7 +191,15 @@ int fifo_init(char *fifo_name) {
   return 0;
 }
 
-int kvs_key_exists(char *key) {
+void trim_trailing_whitespace(char *str) {
+    char *end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) {
+        end--;
+    }
+    end[1] = '\0';
+}
+
+int kvs_key_exists(const char *key) {
   if (kvs_table == NULL) {
     fprintf(stderr, "KVS state must be initialized\n");
     return 1;

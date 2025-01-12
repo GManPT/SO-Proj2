@@ -1,28 +1,33 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
-#include "constants.h"
+#include <pthread.h>
 #include "../common/constants.h"
 
-typedef struct client {
-  int id;
-  char notify_fifo_name;
-  char request_fifo_name[MAX_PIPE_PATH_LENGTH];
-  char response_fifo_name[MAX_PIPE_PATH_LENGTH];
-  int notify_fifo, request_fifo, response_fifo;
-  int subscribed_keys_num;
-  char keys_subscribed[MAX_NUMBER_SUB][MAX_STRING_SIZE];
-} Client;
+/// Structure to hold client data
+typedef struct ClientData {
+    int fds[3]; // 0: request_fd, 1: response_fd, 2: notification_fd
+    int num_keys; // Number of keys subscribed
+    int thread_id; // Thread ID
+    int active; // 1 if the client is active, 0 otherwise
+    char keys[MAX_NUMBER_SUB][MAX_STRING_SIZE + 1]; // Subscribed keys
+    pthread_mutex_t clientMutex;
+    pthread_cond_t clientCond;
+} ClientData;
 
+/// Start client threads at the beginning of the server
+/// @return 0 if successful, -1 otherwise
+int start_client_threads();
 
-Client clients[MAX_NUMBER_SUB];
-int number_of_clients = 0;
+/// Activate a client
+/// @param request_fd File descriptor for the request
+/// @param response_fd File descriptor for the response
+/// @param notification_fd File descriptor for the notification
+/// @return 0 if successful, 1 otherwise
+int activate_client(int request_fd, int response_fd, int notification_fd);
 
-int inform_subscribed_clients(Client* clients[], char* key, char* msg);
-int keyListExists(Client* client, char const* key);
-int keyListAdd(Client* client, char const* key);
-int keyListDelete(Client* client, char const* key);
-int addClient(Client* clients[], Client* client);
-int removeClient(Client* clients[], int id);
+/// Disable a client
+/// @param client_data Client data to disable
+void disable_client(ClientData *client_data);
 
 #endif

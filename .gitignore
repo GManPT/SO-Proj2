@@ -1,8 +1,7 @@
-compile_flags.txt
-src/client/client
-src/client/client_write
-src/server/ems
+src/server/kvs
 src/server/jobs
 *.o
 *.out
 .vscode
+.DS_Store
+.clang-format
