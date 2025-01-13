@@ -11,6 +11,7 @@ typedef struct ClientData {
     int thread_id; // Thread ID
     int active; // 1 if the client is active, 0 otherwise
     char keys[MAX_NUMBER_SUB][MAX_STRING_SIZE + 1]; // Subscribed keys
+    int force_disconnect; // 1 if the client should be disconnected, 0 otherwise
     pthread_mutex_t clientMutex;
     pthread_cond_t clientCond;
 } ClientData;
@@ -25,6 +26,8 @@ int start_client_threads();
 /// @param notification_fd File descriptor for the notification
 /// @return 0 if successful, 1 otherwise
 int activate_client(int request_fd, int response_fd, int notification_fd);
+
+void disconnect_client(ClientData* client_data, int fail, int lock);
 
 /// Disconnect all clients
 void disconnect_all_clients();

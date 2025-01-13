@@ -29,8 +29,6 @@ pthread_mutex_t listc_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Pointer to a hash table structure for storing keys to which clients are subscribed
 static struct IntHashTable *subscribed_keys = NULL;
 
-
-
 /// Notifies all clients subscribed to a specific key with a given value or a "DELETED" message.
 /// @param key The key for which the clients are subscribed.
 /// @param value The value to be sent with the notification. If NULL, the notification will include "DELETED".
@@ -73,15 +71,16 @@ void register_callbacks() {
 /// Disconnect a client
 /// @param client_data Client data
 /// @param cdisconnected 1 if the client is already disconnected, 0 otherwise
-/// @return None
-void disconnect_client(ClientData* client_data, int cdisconnected) {
+void disconnect_client(ClientData* client_data, int cdisconnected, int lock) {
     char response_wrong[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
     char response_right[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_OK_CDU + '0', '\0'};
     int fail = 0;
 
-    if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
-        fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
-        return;
+    if (lock) {
+        if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
+            fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
+            return;
+        }
     }
     
     if (client_data->fds[0] >= 0 && close(client_data->fds[0]) == -1) {
@@ -112,19 +111,49 @@ void disconnect_client(ClientData* client_data, int cdisconnected) {
     memset(client_data->keys, 0, sizeof(client_data->keys));
     client_data->active = 0;
     sem_post(&client_sem);
-    if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
-        fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
+
+    if (lock) {
+        if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
+            fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", client_data->thread_id);
+        }
     }
 }
 
 void disconnect_all_clients() {
     if (pthread_mutex_lock(&listc_mutex) != 0) {
         fprintf(stderr, "Failed to lock listc_mutex\n");
+        return;
     }
 
+    int waiting_disconnects = 0;
+
     for (int i = 0; i < MAX_SESSION_COUNT; i++) {
+        if (pthread_mutex_lock(&clients_data[i].clientMutex) != 0) {
+            fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", clients_data[i].thread_id);
+        }
         if (clients_data[i].active) {
-            disconnect_client(&clients_data[i], 1);
+            clients_data[i].force_disconnect = 1;
+            waiting_disconnects++;
+        }
+        if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
+            fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", clients_data[i].thread_id);
+        }
+    }
+
+    while (waiting_disconnects > 0) {
+        for (int i = 0; i < MAX_SESSION_COUNT; i++) {
+            if (pthread_mutex_lock(&clients_data[i].clientMutex) != 0) {
+                continue;
+            }
+            
+            if (clients_data[i].force_disconnect && !clients_data[i].active) {
+                clients_data[i].force_disconnect = 0;
+                waiting_disconnects--;
+            }
+            
+            if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
+                fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
+            }
         }
     }
 
@@ -209,12 +238,31 @@ void *client_thread(void *data) {
     while(1) {
         if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
             fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
+            continue;
         }
-        while (!client_data->active) {
+
+        if (client_data->force_disconnect && client_data->active) {
+            disconnect = 1;
+            fail = 1;
+            pthread_mutex_unlock(&client_data->clientMutex);
+            disconnect_client(client_data, fail, 1);
+            disconnect = 0;
+            fail = 0;
+            continue;
+        }
+
+        while (!client_data->active && !client_data->force_disconnect) {
             pthread_cond_wait(&client_data->clientCond, &client_data->clientMutex);
         }
+
+        if (client_data->force_disconnect) {
+            pthread_mutex_unlock(&client_data->clientMutex);
+            continue;
+        }
+
         if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
             fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", client_data->thread_id);
+            continue;
         }
         
         // Send OK to client
@@ -227,15 +275,25 @@ void *client_thread(void *data) {
         } else {
             fprintf(stdout, "Client connected to thread %d\n", client_data->thread_id);
         }
-
+        
         request_copy = client_data->fds[0];
 
-        while (1) {
-            if (disconnect) {
-                disconnect_client(client_data, fail);
-                disconnect = 0;
-                fail = 0;
+        while (!disconnect) {
+            if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
+                fprintf(stderr, "Failed to lock mutex for thread\n");
+            }
+            
+            if (client_data->force_disconnect) {
+                disconnect = 1;
+                fail = 1;
+                if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
+                    fprintf(stderr, "Failed to unlock mutex for thread\n");
+                }
                 break;
+            }
+            
+            if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
+                fprintf(stderr, "Failed to unlock mutex for thread\n");
             }
 
             if ((result = read_all(client_data->fds[0], buffer, MAX_SIZE_OPCODE-1, &intr)) == -1) {
@@ -301,6 +359,11 @@ void *client_thread(void *data) {
             }
 
         }
+        if (disconnect) {
+            disconnect_client(client_data, fail, 1);
+            disconnect = 0;
+            fail = 0;
+        }
     }
     
     return NULL;
@@ -350,20 +413,38 @@ int start_client_threads() {
 
 int activate_client(int request_fd, int response_fd, int notification_fd) {
     // Wait for a client to disconnect
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
     sem_wait(&client_sem);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
 
     if (pthread_mutex_lock(&listc_mutex) != 0) {
         fprintf(stderr, "Failed to lock listc_mutex\n");
         return 1;
     }
+
     for (int i = 0; i < MAX_SESSION_COUNT; i++) {
         if (pthread_mutex_lock(&clients_data[i].clientMutex) != 0) {
             fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", i);
+            if (pthread_mutex_unlock(&listc_mutex) != 0) {
+                fprintf(stderr, "Failed to unlock listc_mutex\n");
+                return 1;
+            }
             return 1;
         }
         if (!clients_data[i].active) {
             if (request_fd == -1 || response_fd == -1 || notification_fd == -1) {
                 fprintf(stderr, "Invalid fd. Could not connect\n");
+                if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
+                    fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
+                    return 1;
+                }
+                if (pthread_mutex_unlock(&listc_mutex) != 0) {
+                    fprintf(stderr, "Failed to unlock listc_mutex\n");
+                    return 1;
+                }
                 return 1;
             }
             
@@ -374,6 +455,10 @@ int activate_client(int request_fd, int response_fd, int notification_fd) {
 
             pthread_cond_signal(&clients_data[i].clientCond);
             if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
+                if (pthread_mutex_unlock(&listc_mutex) != 0) {
+                    fprintf(stderr, "Failed to unlock listc_mutex\n");
+                    return 1;
+                }
                 fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
                 return 1;
             }
@@ -384,6 +469,10 @@ int activate_client(int request_fd, int response_fd, int notification_fd) {
             return 0;
         }
         if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
+            if (pthread_mutex_unlock(&listc_mutex) != 0) {
+                fprintf(stderr, "Failed to unlock listc_mutex\n");
+                return 1;
+            }
             fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
             return 1;
         }

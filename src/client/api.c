@@ -238,12 +238,19 @@ int kvs_subscribe(const char *key) {
   }
 
   // Wait for response
-  fprintf(stdout, "Waiting for response\n");
   char response[MAX_RESPONSE_SIZE] = {0};
   if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
     if (intr) {
       fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+      if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to lock mutex\n");
+        return 1;
+      }
       disconnect = 1;
+      if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to unlock mutex\n");
+        return 1;
+      }
       if (kvs_disconnect()) {
         fprintf(stderr, "Failed to disconnect\n");
       }
@@ -252,7 +259,15 @@ int kvs_subscribe(const char *key) {
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
     fprintf(stderr, "Server disconnected\n");
+    if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to lock mutex\n");
+      return 1;
+    }
     disconnect = 1;
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+      return 1;
+    }
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
     }
@@ -303,7 +318,15 @@ int kvs_unsubscribe(const char *key) {
   if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
     if (intr) {
       fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+      if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to lock mutex\n");
+        return 1;
+      }
       disconnect = 1;
+      if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to unlock mutex\n");
+        return 1;
+      }
       if (kvs_disconnect()) {
         fprintf(stderr, "Failed to disconnect\n");
       }
@@ -312,7 +335,15 @@ int kvs_unsubscribe(const char *key) {
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
     fprintf(stderr, "Server disconnected\n");
+    if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to lock mutex\n");
+      return 1;
+    }
     disconnect = 1;
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+      return 1;
+    }
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
     }
