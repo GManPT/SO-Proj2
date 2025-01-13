@@ -368,10 +368,10 @@ int activate_client(int request_fd, int response_fd, int notification_fd) {
             fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
             return 1;
         }
-        if (pthread_mutex_unlock(&listc_mutex) != 0) {
-            fprintf(stderr, "Failed to unlock listc_mutex\n");
-            return 1;
-        }
+    }
+    if (pthread_mutex_unlock(&listc_mutex) != 0) {
+        fprintf(stderr, "Failed to unlock listc_mutex\n");
+        return 1;
     }
     return -1;
 }
