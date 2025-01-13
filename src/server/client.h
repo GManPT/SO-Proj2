@@ -26,8 +26,12 @@ int start_client_threads();
 /// @return 0 if successful, 1 otherwise
 int activate_client(int request_fd, int response_fd, int notification_fd);
 
-/// Disable a client
-/// @param client_data Client data to disable
-void disable_client(ClientData *client_data);
+/// Disconnect a client
+/// @param client_data Client data
+/// @param fail 1 if the client failed, 0 otherwise
+void disconnect_client(ClientData* client_data, int fail);
+
+/// Disconnect all clients
+void disconnect_all_clients();
 
 #endif

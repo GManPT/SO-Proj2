@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 
 #include "client.h"
 #include "constants.h"
@@ -16,40 +17,13 @@
 pthread_t client_threads[MAX_SESSION_COUNT];
 ClientData clients_data[MAX_SESSION_COUNT];
 sem_t client_sem;
+pthread_mutex_t listc_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct IntHashTable *subscribed_keys = NULL;
-
-void print_node_values(const char* key) {
-    unsigned int index = chash(key);
-    pthread_rwlock_rdlock(&subscribed_keys->tableLock);
-    IntNode *node = subscribed_keys->nodes[index];
-    if (!node) {
-        printf("Key %s: No values\n", key);
-        pthread_rwlock_unlock(&subscribed_keys->tableLock);
-        return;
-    }
-    pthread_rwlock_unlock(&subscribed_keys->tableLock);
-
-    pthread_rwlock_rdlock(&node->nodeLock);
-    printf("Key %s values: [", key);
-    for(int i = 0; i < node->count; i++) {
-        printf("%d%s", node->values[i], i < node->count - 1 ? ", " : "");
-    }
-    printf("]\n");
-    pthread_rwlock_unlock(&node->nodeLock);
-}
-
-void print_client_keys(ClientData* client_data) {
-    printf("Thread %d keys: [", client_data->thread_id);
-    for(int i = 0; i < client_data->num_keys; i++) {
-        printf("%s%s", client_data->keys[i], i < client_data->num_keys - 1 ? ", " : "");
-    }
-    printf("]\n");
-}
 
 void notify_clients(const char* key, const char* value) {
     int count;
     int* notify_fds = get_fds(subscribed_keys, key, &count);
-    if (!notify_fds) {
+    if (!notify_fds || count == 0) {
         return;
     }
     char notification[MAX_WRITE_SIZE_RESPONSE] = {0};
@@ -68,7 +42,6 @@ void notify_clients(const char* key, const char* value) {
             fprintf(stderr, "Failed to send notification\n");
         }
     }
-    
 }
 
 void register_callbacks() {
@@ -102,10 +75,35 @@ void disconnect_client(ClientData* client_data, int cdisconnected) {
     for (int i = 0; i < client_data->num_keys; i++) {
         remove_key(subscribed_keys, client_data->keys[i], client_data->fds[2]);
     }
+    client_data->fds[0] = -1;
+    client_data->fds[1] = -1;
+    client_data->fds[2] = -1;
     client_data->num_keys = 0;
     memset(client_data->keys, 0, sizeof(client_data->keys));
     client_data->active = 0;
     sem_post(&client_sem);
+}
+
+void disconnect_all_clients() {
+    if (pthread_mutex_lock(&listc_mutex) != 0) {
+        fprintf(stderr, "Failed to lock listc_mutex\n");
+    }
+
+    for (int i = 0; i < MAX_SESSION_COUNT; i++) {
+        if (pthread_mutex_lock(&clients_data[i].clientMutex) != 0) {
+            fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", clients_data[i].thread_id);
+        }
+        if (clients_data[i].active) {
+            disconnect_client(&clients_data[i], 1);
+        }
+        if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
+            fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", clients_data[i].thread_id);
+        }
+    }
+
+    if (pthread_mutex_unlock(&listc_mutex) != 0) {
+        fprintf(stderr, "Failed to unlock listc_mutex\n");
+    }
 }
 
 void client_subscribe_key(ClientData* client_data, const char* key) {
@@ -129,8 +127,7 @@ void client_subscribe_key(ClientData* client_data, const char* key) {
             add_key(subscribed_keys, key, client_data->fds[2]);
         }
     }
-    //print_node_values(key);
-    //print_client_keys(client_data);
+
     if (write_all(client_data->fds[1], fail ? response_wrong : response_right, MAX_RESPONSE_SIZE-1) == -1) {
         fprintf(stderr, "Failed to send response\n");
     }
@@ -142,7 +139,6 @@ void client_unsubscribe_key(ClientData* client_data, const char* key) {
     int fail = 0;
     
     // Check if the client was subscribed to the key
-    
     if (remove_key_from_subscribed_list(key, client_data->keys, client_data->num_keys)) {
         fprintf(stderr, "Client %d is not subscribed to key: %s\n", client_data->thread_id, key);
         fail = 1;
@@ -150,8 +146,7 @@ void client_unsubscribe_key(ClientData* client_data, const char* key) {
         remove_key(subscribed_keys, key, client_data->fds[2]);
         client_data->num_keys--;
     }
-    //print_node_values(key);
-    //print_client_keys(client_data);
+    
     if (write_all(client_data->fds[1], fail ? response_wrong : response_right, MAX_RESPONSE_SIZE-1) == -1) {
         fprintf(stderr, "Failed to send response\n");
     }
@@ -159,12 +154,20 @@ void client_unsubscribe_key(ClientData* client_data, const char* key) {
 
 void *client_thread(void *data) {
     ClientData *client_data = (ClientData *)data;
-    int result, intr = 0, disconnect = 0, fail = 0;
+    int result, intr = 0, disconnect = 0, fail = 0, request_copy;
 
     // Buffer for reading from pipe
     char buffer[MAX_SIZE_OPCODE] = {0};
     char key[MAX_STRING_SIZE + 1] = {0};
     char rw[3];
+
+    // Block sigusr1
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+        fprintf(stderr, "Failed to block SIGUSR1\n");
+    }
 
     while(1) {
         if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
@@ -181,12 +184,14 @@ void *client_thread(void *data) {
         rw[0] = OP_CODE_CONNECT + '0';
         rw[1] = OP_CODE_OK_CDU + '0';
         rw[2] = '\0';
-        if (write_all(client_data->fds[1], rw, 2) == -1) {
+        if (write_all(client_data->fds[1], rw, MAX_RESPONSE_SIZE-1) == -1) {
             fprintf(stderr, "Failed to send response\n");
             disconnect = 1;
         } else {
             fprintf(stdout, "Client connected to thread %d\n", client_data->thread_id);
         }
+
+        request_copy = client_data->fds[0];
 
         while (1) {
             if (disconnect) {
@@ -205,20 +210,29 @@ void *client_thread(void *data) {
 
             if ((result = read_all(client_data->fds[0], buffer, MAX_SIZE_OPCODE-1, &intr)) == -1) {
                 if (intr) {
+                    if (request_copy == client_data->fds[0]) {
+                        fprintf(stderr, "Client disconnected\n");
+                        intr = 0;
+                        disconnect = 1;
+                        fail = 1;
+                        continue;
+                    }
                     // Client disconnected
                     fprintf(stderr, "Read was interrupted\n");
                     intr = 0;
+                    break;
+                }
+                fprintf(stderr, "Failed to read from request pipe\n");
+                continue;
+            } else if (result == 0) {
+                if (request_copy == client_data->fds[0]) {
+                    fprintf(stderr, "Client disconnected\n");
                     disconnect = 1;
                     fail = 1;
                     continue;
                 }
-                fprintf(stderr, "Failed to read from request pipe\n");
-            } else if (result == 0) {
-                // Client disconnected
-                fprintf(stderr, "Client disconnected\n");
-                disconnect = 1;
-                fail = 1;
-                continue;
+                // Client changed
+                break;
             }
 
             char op_code = buffer[0] - '0';
@@ -305,7 +319,18 @@ int start_client_threads() {
 }
 
 int activate_client(int request_fd, int response_fd, int notification_fd) {
+    // Wait for a client to disconnect
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
     sem_wait(&client_sem);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+
+    if (pthread_mutex_lock(&listc_mutex) != 0) {
+        fprintf(stderr, "Failed to lock listc_mutex\n");
+        return 1;
+    }
     for (int i = 0; i < MAX_SESSION_COUNT; i++) {
         if (pthread_mutex_lock(&clients_data[i].clientMutex) != 0) {
             fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", i);
@@ -327,10 +352,18 @@ int activate_client(int request_fd, int response_fd, int notification_fd) {
                 fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
                 return 1;
             }
+            if (pthread_mutex_unlock(&listc_mutex) != 0) {
+                fprintf(stderr, "Failed to unlock listc_mutex\n");
+                return 1;
+            }
             return 0;
         }
         if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
             fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", i);
+            return 1;
+        }
+        if (pthread_mutex_unlock(&listc_mutex) != 0) {
+            fprintf(stderr, "Failed to unlock listc_mutex\n");
             return 1;
         }
     }

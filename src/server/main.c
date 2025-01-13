@@ -7,6 +7,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <errno.h>
+#include <signal.h>
 
 #include "constants.h"
 #include "../common/constants.h"
@@ -24,7 +26,7 @@ struct SharedData {
   pthread_mutex_t directory_mutex;
 };
 
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t kvs_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
 
 size_t active_backups = 0; // Number of active backups
@@ -33,6 +35,29 @@ size_t max_threads;        // Maximum allowed simultaneous threads
 char *jobs_directory = NULL;
 
 char regist_fifo_name[MAX_PIPE_PATH_LENGTH]; // FIFO of registration
+
+void handle_sigusr1(int) {
+  // Lock the KVS mutex to block run_job threads
+  if (pthread_mutex_lock(&kvs_lock) != 0) {
+    fprintf(stderr, "Failed to lock kvs_lock\n");
+    return;
+  }
+
+  disconnect_all_clients();
+
+  // Terminate and reinitialize the KVS
+  kvs_terminate();
+  kvs_init();
+
+  if (signal(SIGUSR1, handle_sigusr1) == SIG_ERR) {
+    fprintf(stderr, "Failed to set signal handler\n");
+  }
+
+    // Unlock the KVS mutex
+  if (pthread_mutex_unlock(&kvs_lock) != 0) {
+    fprintf(stderr, "Failed to unlock kvs_lock\n");
+  }
+}
 
 static int entry_files(const char *dir, struct dirent *entry, char *in_path,
                        char *out_path) {
@@ -118,7 +143,7 @@ static int run_job(int in_fd, int out_fd, char *filename) {
       }
 
       if (delay > 0) {
-        printf("Waiting %d seconds\n", delay / 1000);
+        //printf("Waiting %d seconds\n", delay / 1000);
         kvs_wait(delay);
       }
       break;
@@ -161,7 +186,7 @@ static int run_job(int in_fd, int out_fd, char *filename) {
       break;
 
     case EOC:
-      printf("EOF\n");
+      //printf("EOF\n");
       return 0;
     }
   }
@@ -240,19 +265,36 @@ void handle_fifo() {
   char buffer[BUFFER_SIZE] = {0};
   char rw[3] = {OP_CODE_CONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
 
-  // Open FIFO
-  regist_fifo = open(regist_fifo_name, O_RDONLY);
-  if (regist_fifo == -1) {
-    fprintf(stderr, "Failed to open main FIFO\n");
+  // Set signal handler
+  void (*old_handler)(int) = signal(SIGUSR1, handle_sigusr1);
+  if (old_handler == SIG_ERR) {
+    fprintf(stderr, "Failed to set signal handler\n");
     return;
   }
-  
+
+  // Open FIFO
+  while (1) {
+    regist_fifo = open(regist_fifo_name, O_RDONLY | O_NONBLOCK);
+    if (regist_fifo != -1) break;
+    
+    if (errno != ENOENT && errno != EINTR) {
+      fprintf(stderr, "Failed to open main FIFO\n");
+      return;
+    }
+    sleep(1);
+  }
+
+  // Change to blocking mode
+  int flags = fcntl(regist_fifo, F_GETFL);
+  fcntl(regist_fifo, F_SETFL, flags & ~O_NONBLOCK);
+
   while (1) {
     result = read_all(regist_fifo, buffer, BUFFER_SIZE-1, &intr);
     if (result == -1 || result == 0) {
       if (intr) intr = 0;
       continue;
     }
+    if (errno == EINTR) continue;
 
     char op_code = buffer[0] - '0';
     if (op_code == OP_CODE_CONNECT) {
@@ -288,7 +330,7 @@ void handle_fifo() {
       request_fd = open(request, O_RDONLY);
       if (request_fd == -1) {
         fprintf(stderr, "Failed to open request pipe\n");
-        if (write_all(response_fd, rw, 2) == -1) {
+        if (write_all(response_fd, rw, MAX_RESPONSE_SIZE-1) == -1) {
           fprintf(stderr, "Failed to write to response pipe\n");
         }
         close(response_fd);
@@ -298,7 +340,7 @@ void handle_fifo() {
       notification_fd = open(notification, O_WRONLY);
       if (notification_fd == -1) {
         fprintf(stderr, "Failed to open notification pipe\n");
-        if (write_all(response_fd, rw, 2) == -1) {
+        if (write_all(response_fd, rw, MAX_RESPONSE_SIZE-1) == -1) {
           fprintf(stderr, "Failed to write to response pipe\n");
         }
         close(request_fd);
@@ -308,7 +350,7 @@ void handle_fifo() {
 
       if (activate_client(request_fd, response_fd, notification_fd) != 0) {
         fprintf(stderr, "Failed to connect client\n");
-        if (write_all(response_fd, rw, 2) == -1) {
+        if (write_all(response_fd, rw, MAX_RESPONSE_SIZE-1) == -1) {
           fprintf(stderr, "Failed to write to response pipe\n");
         }
         close(request_fd);

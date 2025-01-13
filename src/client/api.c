@@ -22,33 +22,36 @@ int disconnect = 0;
 
 int kvs_disconnect(void) {
   int result, intr = 0;
-
-  if (disconnect) return 0;
-  else disconnect = 1;
   
-  // Send disconnect message
-  char message[MAX_SIZE_OPCODE] = {OP_CODE_DISCONNECT + '0', '\0'};
-  if (write_all(request_fd, message, MAX_SIZE_OPCODE - 1) == -1) {
-    fprintf(stderr, "Failed to write to request pipe\n");
-    return 1;
-  }
+  if (!disconnect) {
+    disconnect = 1;
 
-  // Wait for server response
-  char response[MAX_RESPONSE_SIZE] = {0};
-  if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
-    if (intr) {
-      fprintf(stderr, "Read was interrupted (Pipe closed)\n");
-    } else {
-      fprintf(stderr, "Failed to read from request pipe\n");
+    // Send disconnect message
+    char message[MAX_SIZE_OPCODE] = {OP_CODE_DISCONNECT + '0', '\0'};
+    if (write_all(request_fd, message, MAX_SIZE_OPCODE - 1) == -1) {
+      fprintf(stderr, "Failed to write to request pipe\n");
       return 1;
     }
-  } else if (result == 0) {
-    fprintf(stderr, "Server disconnected\n");
-  }
 
-  if (response[1] - '0' != OP_CODE_OK_CDU) {
-    fprintf(stderr, "Server failed to disconnect\n");
-    return 1;
+    // Wait for server response
+    char response[MAX_RESPONSE_SIZE] = {0};
+    if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
+      if (intr) {
+        fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+      } else {
+        fprintf(stderr, "Failed to read from request pipe\n");
+        return 1;
+      }
+    } else if (result == 0) {
+      fprintf(stderr, "Server disconnected\n");
+    }
+
+    if (response[1] - '0' != OP_CODE_OK_CDU) {
+      fprintf(stderr, "Server failed to disconnect\n");
+      return 1;
+    }
+
+    fprintf(stdout, "Server returned %d for operation: disconnect\n", response[1] - '0');
   }
 
   // Close pipes
@@ -172,6 +175,8 @@ int kvs_connect(char const *req_pipe_path, char const *resp_pipe_path,
 int kvs_subscribe(const char *key) {
   int result, intr = 0;
 
+  if (disconnect) exit(1);
+
   if (request_fd == -1 || response_fd == -1) {
     fprintf(stderr, "Not connected to server\n");
     return 1;
@@ -192,6 +197,7 @@ int kvs_subscribe(const char *key) {
   if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
     if (intr) {
       fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+      disconnect = 1;
       if (kvs_disconnect()) {
         fprintf(stderr, "Failed to disconnect\n");
       }
@@ -200,6 +206,7 @@ int kvs_subscribe(const char *key) {
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
     fprintf(stderr, "Server disconnected\n");
+    disconnect = 1;
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
     }
@@ -214,6 +221,8 @@ int kvs_subscribe(const char *key) {
 
 int kvs_unsubscribe(const char *key) {
   int result, intr = 0;
+
+  if (disconnect) exit(1);
 
   if (request_fd == -1 || response_fd == -1) {
     fprintf(stderr, "Not connected to server\n");
@@ -235,6 +244,7 @@ int kvs_unsubscribe(const char *key) {
   if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
     if (intr) {
       fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+      disconnect = 1;
       if (kvs_disconnect()) {
         fprintf(stderr, "Failed to disconnect\n");
       }
@@ -243,6 +253,7 @@ int kvs_unsubscribe(const char *key) {
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
     fprintf(stderr, "Server disconnected\n");
+    disconnect = 1;
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
     }
@@ -292,7 +303,11 @@ void* kvs_notifications(void* arg) {
   while(1) {
     if ((result = read_all(notification_fd, notification, MAX_WRITE_SIZE_RESPONSE - 1, &intr)) == -1) {
       if (intr) {
+        if (disconnect) {
+          return NULL;
+        }
         fprintf(stderr, "Read was interrupted (Pipe closed)\n");
+        disconnect = 1;
         if (kvs_disconnect()) {
           fprintf(stderr, "Failed to disconnect\n");
         }
@@ -300,8 +315,13 @@ void* kvs_notifications(void* arg) {
       }
       fprintf(stderr, "Failed to read from notification pipe\n");
     } else if (result == 0) {
-      fprintf(stderr, "Server disconnected\n");
+      if (disconnect) {
+        return NULL;
+      }
+      fprintf(stderr, "Server disconnected (notification pipe closed)\n");
+      disconnect = 1;
       if (kvs_disconnect()) {
+        fprintf(stderr, "Failed\n");
         fprintf(stderr, "Failed to disconnect\n");
       }
       return NULL;
