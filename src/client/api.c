@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include "api.h"
@@ -18,13 +19,30 @@ static int request_fd = -1;
 static int response_fd = -1;
 static int notification_fd = -1;
 
-int disconnect = 0;
+static pthread_mutex_t disconnect_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t disconnect_cond = PTHREAD_COND_INITIALIZER;
+static int disconnect = 0;
+static int thread_finished = 0;
 
 int kvs_disconnect(void) {
   int result, intr = 0;
   
+  if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to lock mutex\n");
+    return 1;
+  }
   if (!disconnect) {
     disconnect = 1;
+    pthread_cond_signal(&disconnect_cond);
+    
+    // Wait for thread to finish
+    while (!thread_finished) {
+      pthread_cond_wait(&disconnect_cond, &disconnect_mutex);
+    }
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+      return 1;
+    }
 
     // Send disconnect message
     char message[MAX_SIZE_OPCODE] = {OP_CODE_DISCONNECT + '0', '\0'};
@@ -52,26 +70,31 @@ int kvs_disconnect(void) {
     }
 
     fprintf(stdout, "Server returned %d for operation: disconnect\n", response[1] - '0');
-  }
 
-  // Close pipes
-  if (close(request_fd) == -1) {
-    fprintf(stderr, "Failed to close request pipe\n");
-    return 1;
-  }
-  if (close(response_fd) == -1) {
-    fprintf(stderr, "Failed to close response pipe\n");
-    return 1;
-  }
-  if (close(notification_fd) == -1) {
-    fprintf(stderr, "Failed to close notification pipe\n");
-    return 1;
-  }
+    // Close pipes
+    if (close(request_fd) == -1) {
+      fprintf(stderr, "Failed to close request pipe\n");
+      return 1;
+    }
+    if (close(response_fd) == -1) {
+      fprintf(stderr, "Failed to close response pipe\n");
+      return 1;
+    }
+    if (close(notification_fd) == -1) {
+      fprintf(stderr, "Failed to close notification pipe\n");
+      return 1;
+    }
 
-  // Unlink pipes
-  unlink(req_path);
-  unlink(resp_path);
-  unlink(notif_path);
+    // Unlink pipes
+    unlink(req_path);
+    unlink(resp_path);
+    unlink(notif_path);
+  } else {
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+      return 1;
+    }
+  }
 
   return 0;
 }
@@ -175,7 +198,20 @@ int kvs_connect(char const *req_pipe_path, char const *resp_pipe_path,
 int kvs_subscribe(const char *key) {
   int result, intr = 0;
 
-  if (disconnect) exit(1);
+  if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to lock mutex\n");
+    return 1;
+  }
+  if (disconnect) {
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+    }
+    return 2;
+  }
+  if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to unlock mutex\n");
+    return 1;
+  }
 
   if (request_fd == -1 || response_fd == -1) {
     fprintf(stderr, "Not connected to server\n");
@@ -193,6 +229,7 @@ int kvs_subscribe(const char *key) {
   }
 
   // Wait for response
+  fprintf(stdout, "Waiting for response\n");
   char response[MAX_RESPONSE_SIZE] = {0};
   if ((result = read_all(response_fd, response, MAX_RESPONSE_SIZE - 1, &intr)) == -1) {
     if (intr) {
@@ -222,7 +259,15 @@ int kvs_subscribe(const char *key) {
 int kvs_unsubscribe(const char *key) {
   int result, intr = 0;
 
-  if (disconnect) exit(1);
+  if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to lock mutex\n");
+    return 1;
+  }
+  if (disconnect) return 2;
+  if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to unlock mutex\n");
+    return 1;
+  }
 
   if (request_fd == -1 || response_fd == -1) {
     fprintf(stderr, "Not connected to server\n");
@@ -301,33 +346,66 @@ void* kvs_notifications(void* arg) {
   // Read notifications
   char notification[MAX_WRITE_SIZE_RESPONSE] = {0};
   while(1) {
+    if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to lock mutex\n");
+      return NULL;
+    }
+    if (disconnect) {
+      thread_finished = 1;
+      pthread_cond_signal(&disconnect_cond);
+      if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to unlock mutex\n");
+        return NULL;
+      }
+      return NULL;
+    }
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+      return NULL;
+    }
+
     if ((result = read_all(notification_fd, notification, MAX_WRITE_SIZE_RESPONSE - 1, &intr)) == -1) {
       if (intr) {
+        if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+          fprintf(stderr, "Failed to lock mutex\n");
+          return NULL;
+        }
         if (disconnect) {
+          thread_finished = 1;
+          pthread_cond_signal(&disconnect_cond);
+          pthread_mutex_unlock(&disconnect_mutex);
+          return NULL;
+      }
+        if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+          fprintf(stderr, "Failed to unlock mutex\n");
           return NULL;
         }
         fprintf(stderr, "Read was interrupted (Pipe closed)\n");
-        disconnect = 1;
-        if (kvs_disconnect()) {
-          fprintf(stderr, "Failed to disconnect\n");
-        }
-        return NULL;
+      } else {
+        fprintf(stderr, "Failed to read from notification pipe\n");
       }
       fprintf(stderr, "Failed to read from notification pipe\n");
     } else if (result == 0) {
-      if (disconnect) {
-        return NULL;
-      }
       fprintf(stderr, "Server disconnected (notification pipe closed)\n");
-      disconnect = 1;
-      if (kvs_disconnect()) {
-        fprintf(stderr, "Failed\n");
-        fprintf(stderr, "Failed to disconnect\n");
-      }
-      return NULL;
+      break;
     }
 
     // Print notification
     print_notification(notification, MAX_WRITE_SIZE_RESPONSE);
   }
+
+  if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to lock mutex\n");
+    return NULL;
+  }
+  if (!disconnect) {
+    disconnect = 1;
+    thread_finished = 1;
+    pthread_cond_signal(&disconnect_cond);
+  }
+  if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+    fprintf(stderr, "Failed to unlock mutex\n");
+    return NULL;
+  }
+  return NULL;
 }

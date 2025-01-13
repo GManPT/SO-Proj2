@@ -59,6 +59,10 @@ void disconnect_client(ClientData* client_data, int cdisconnected) {
     char response_wrong[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
     char response_right[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_OK_CDU + '0', '\0'};
     int fail = 0;
+
+    if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
+        fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
+    }
     
     if (client_data->fds[0] >= 0 && close(client_data->fds[0]) == -1) {
         fprintf(stderr, "Failed to close request pipe\n");
@@ -88,6 +92,9 @@ void disconnect_client(ClientData* client_data, int cdisconnected) {
     memset(client_data->keys, 0, sizeof(client_data->keys));
     client_data->active = 0;
     sem_post(&client_sem);
+    if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
+        fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
+    }
 }
 
 void disconnect_all_clients() {
@@ -96,14 +103,8 @@ void disconnect_all_clients() {
     }
 
     for (int i = 0; i < MAX_SESSION_COUNT; i++) {
-        if (pthread_mutex_lock(&clients_data[i].clientMutex) != 0) {
-            fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", clients_data[i].thread_id);
-        }
         if (clients_data[i].active) {
             disconnect_client(&clients_data[i], 1);
-        }
-        if (pthread_mutex_unlock(&clients_data[i].clientMutex) != 0) {
-            fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", clients_data[i].thread_id);
         }
     }
 
@@ -201,14 +202,7 @@ void *client_thread(void *data) {
 
         while (1) {
             if (disconnect) {
-                if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
-                    fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
-                }
                 disconnect_client(client_data, fail);
-                if (pthread_mutex_unlock(&client_data->clientMutex) != 0) {
-                    fprintf(stderr, "Failed to unlock mutex for thread in position: %d\n", client_data->thread_id);
-                }
-
                 disconnect = 0;
                 fail = 0;
                 break;

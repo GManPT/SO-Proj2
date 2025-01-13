@@ -25,6 +25,7 @@ int main(int argc, char *argv[]) {
   char keys[MAX_NUMBER_SUB][MAX_STRING_SIZE] = {0};
   unsigned int delay_ms;
   size_t num;
+  int result = 0;
 
   strncat(req_pipe_path, argv[1], strlen(argv[1]) * sizeof(char));
   strncat(resp_pipe_path, argv[1], strlen(argv[1]) * sizeof(char));
@@ -56,11 +57,11 @@ int main(int argc, char *argv[]) {
         return 1;
       }
       
-      if (pthread_cancel(notifications_thread) != 0) {
-        fprintf(stderr, "Failed to cancel notifications thread\n");
+      if (pthread_join(notifications_thread, NULL) != 0) {
+        fprintf(stderr, "Failed to join notifications thread\n");
         return 1;
       }
-      
+
       fprintf(stdout, "Disconnected from server\n");
       return 0;
 
@@ -70,8 +71,15 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Invalid command. See HELP for usage\n");
         continue;
       }
-
-      if (kvs_subscribe(keys[0])) {
+      
+      if ((result = kvs_subscribe(keys[0])) != 0) {
+        if (result == 2) {
+          if (pthread_join(notifications_thread, NULL) != 0) {
+            fprintf(stderr, "Failed to join notifications thread\n");
+            return 1;
+          }
+          _exit(0);
+        }
         fprintf(stderr, "Command subscribe failed\n");
       }
 
@@ -84,8 +92,15 @@ int main(int argc, char *argv[]) {
         continue;
       }
 
-      if (kvs_unsubscribe(keys[0])) {
-        fprintf(stderr, "Command subscribe failed\n");
+      if ((result = kvs_unsubscribe(keys[0])) != 0) {
+        if (result == 2) {
+          if (pthread_join(notifications_thread, NULL) != 0) {
+            fprintf(stderr, "Failed to join notifications thread\n");
+            return 1;
+          }
+          _exit(0);
+        }
+        fprintf(stderr, "Command unsubscribe failed\n");
       }
 
       break;
@@ -114,6 +129,12 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to disconnect to the server\n");
         return 1;
       }
+
+      if (pthread_join(notifications_thread, NULL) != 0) {
+        fprintf(stderr, "Failed to join notifications thread\n");
+        return 1;
+      }
+      
       break;
     }
   }
