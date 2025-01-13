@@ -68,9 +68,12 @@ int kvs_write(size_t num_pairs, char keys[][MAX_STRING_SIZE],
   for (size_t i = 0; i < num_pairs; i++) {
     // Compare if old value is different from new value
     char *old_value = read_pair(kvs_table, keys[i]);
-    if (old_value != NULL && strcmp(old_value, values[i]) == 0) {
+    if (old_value != NULL) {
+      if (strcmp(old_value, values[i]) == 0) {
+        free(old_value);
+        continue;
+      }
       free(old_value);
-      continue;
     }
 
     if (write_pair(kvs_table, keys[i], values[i]) != 0) {
@@ -199,7 +202,7 @@ int kvs_backup(size_t num_backup, char *job_filename, char *directory) {
         keyNode = keyNode->next; // Move to the next node of the list
       }
     }
-    exit(1);
+    _exit(1);
   } else if (pid < 0) {
     return -1;
   }

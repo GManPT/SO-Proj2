@@ -23,7 +23,11 @@ static struct IntHashTable *subscribed_keys = NULL;
 void notify_clients(const char* key, const char* value) {
     int count;
     int* notify_fds = get_fds(subscribed_keys, key, &count);
-    if (!notify_fds || count == 0) {
+    if (!notify_fds) {
+        return;
+    }
+    if (count == 0) {
+        free(notify_fds);
         return;
     }
     char notification[MAX_WRITE_SIZE_RESPONSE] = {0};
@@ -42,6 +46,8 @@ void notify_clients(const char* key, const char* value) {
             fprintf(stderr, "Failed to send notification\n");
         }
     }
+    
+    free(notify_fds);
 }
 
 void register_callbacks() {

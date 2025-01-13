@@ -37,12 +37,6 @@ char *jobs_directory = NULL;
 char regist_fifo_name[MAX_PIPE_PATH_LENGTH]; // FIFO of registration
 
 void handle_sigusr1(int) {
-  // Lock the KVS mutex to block run_job threads
-  if (pthread_mutex_lock(&kvs_lock) != 0) {
-    fprintf(stderr, "Failed to lock kvs_lock\n");
-    return;
-  }
-
   disconnect_all_clients();
 
   // Terminate and reinitialize the KVS
@@ -51,11 +45,6 @@ void handle_sigusr1(int) {
 
   if (signal(SIGUSR1, handle_sigusr1) == SIG_ERR) {
     fprintf(stderr, "Failed to set signal handler\n");
-  }
-
-    // Unlock the KVS mutex
-  if (pthread_mutex_unlock(&kvs_lock) != 0) {
-    fprintf(stderr, "Failed to unlock kvs_lock\n");
   }
 }
 
@@ -143,7 +132,7 @@ static int run_job(int in_fd, int out_fd, char *filename) {
       }
 
       if (delay > 0) {
-        //printf("Waiting %d seconds\n", delay / 1000);
+        printf("Waiting %d seconds\n", delay / 1000);
         kvs_wait(delay);
       }
       break;
@@ -186,7 +175,7 @@ static int run_job(int in_fd, int out_fd, char *filename) {
       break;
 
     case EOC:
-      //printf("EOF\n");
+      printf("EOF\n");
       return 0;
     }
   }
@@ -242,7 +231,7 @@ static void *get_file(void *arguments) {
         return 0;
       }
 
-      exit(0);
+      _exit(0);
     }
 
     if (pthread_mutex_lock(&thread_data->directory_mutex) != 0) {

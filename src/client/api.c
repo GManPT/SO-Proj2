@@ -82,11 +82,11 @@ int kvs_connect(char const *req_pipe_path, char const *resp_pipe_path,
 
   // Store the paths
   strncpy(req_path, req_pipe_path, MAX_PIPE_PATH_LENGTH - 1);
-  req_path[MAX_PIPE_PATH_LENGTH] = '\0';
+  req_path[MAX_PIPE_PATH_LENGTH - 1] = '\0';
   strncpy(resp_path, resp_pipe_path, MAX_PIPE_PATH_LENGTH - 1);
-  resp_path[MAX_PIPE_PATH_LENGTH] = '\0';
+  resp_path[MAX_PIPE_PATH_LENGTH - 1] = '\0';
   strncpy(notif_path, notif_pipe_path, MAX_PIPE_PATH_LENGTH - 1);
-  notif_path[MAX_PIPE_PATH_LENGTH] = '\0';
+  notif_path[MAX_PIPE_PATH_LENGTH - 1] = '\0';
 
   // Unlink pipes if they already exist
   unlink(req_path);
