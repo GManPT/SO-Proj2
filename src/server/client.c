@@ -14,12 +14,26 @@
 #include "../common/constants.h"
 #include "../common/protocol.h"
 
+// Array of thread identifiers for managing up to MAX_SESSION_COUNT client threads
 pthread_t client_threads[MAX_SESSION_COUNT];
+
+// Array to store data related to each client session
 ClientData clients_data[MAX_SESSION_COUNT];
+
+// Semaphore to control access to the client session queue or synchronization between threads
 sem_t client_sem;
+
+// Mutex to protect shared resources or critical sections related to client list management
 pthread_mutex_t listc_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Pointer to a hash table structure for storing keys to which clients are subscribed
 static struct IntHashTable *subscribed_keys = NULL;
 
+
+
+/// Notifies all clients subscribed to a specific key with a given value or a "DELETED" message.
+/// @param key The key for which the clients are subscribed.
+/// @param value The value to be sent with the notification. If NULL, the notification will include "DELETED".
 void notify_clients(const char* key, const char* value) {
     int count;
     int* notify_fds = get_fds(subscribed_keys, key, &count);
@@ -50,11 +64,15 @@ void notify_clients(const char* key, const char* value) {
     free(notify_fds);
 }
 
+/// Registers callback functions for write and delete events.
 void register_callbacks() {
     register_write_callback(notify_clients);
     register_delete_callback(notify_clients);
 }
 
+/// Disconnect a client
+/// @param client_data Client data
+/// @param cdisconnected 1 if the client is already disconnected, 0 otherwise
 void disconnect_client(ClientData* client_data, int cdisconnected) {
     char response_wrong[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
     char response_right[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_OK_CDU + '0', '\0'};
@@ -113,6 +131,9 @@ void disconnect_all_clients() {
     }
 }
 
+/// Handles client subscription to a key in the KVS.
+/// @param client_data The data associated with the client requesting the subscription.
+/// @param key The key the client wants to subscribe to.
 void client_subscribe_key(ClientData* client_data, const char* key) {
     char response_wrong[3] = {OP_CODE_SUBSCRIBE + '0', OP_CODE_ERROR_S + '0', '\0'};
     char response_right[3] = {OP_CODE_SUBSCRIBE + '0', OP_CODE_OK_S + '0', '\0'};
@@ -140,6 +161,9 @@ void client_subscribe_key(ClientData* client_data, const char* key) {
     }
 }
 
+/// Handles client unsubscription from a key in the KVS.
+/// @param client_data The data associated with the client requesting the unsubscription.
+/// @param key The key the client wants to unsubscribe from.
 void client_unsubscribe_key(ClientData* client_data, const char* key) {
     char response_wrong[3] = {OP_CODE_UNSUBSCRIBE + '0', OP_CODE_ERROR_CDU + '0', '\0'};
     char response_right[3] = {OP_CODE_UNSUBSCRIBE + '0', OP_CODE_OK_CDU + '0', '\0'};
@@ -159,6 +183,10 @@ void client_unsubscribe_key(ClientData* client_data, const char* key) {
     }
 }
 
+/// Handles the client thread logic, processing client requests and managing their subscription status.
+/// @param data A pointer to the `ClientData` structure containing the client’s information 
+/// (file descriptors, active status, etc.).
+/// @return NULL
 void *client_thread(void *data) {
     ClientData *client_data = (ClientData *)data;
     int result, intr = 0, disconnect = 0, fail = 0, request_copy;
@@ -320,12 +348,7 @@ int start_client_threads() {
 
 int activate_client(int request_fd, int response_fd, int notification_fd) {
     // Wait for a client to disconnect
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, SIGUSR1);
-    sigprocmask(SIG_BLOCK, &set, NULL);
     sem_wait(&client_sem);
-    sigprocmask(SIG_UNBLOCK, &set, NULL);
 
     if (pthread_mutex_lock(&listc_mutex) != 0) {
         fprintf(stderr, "Failed to lock listc_mutex\n");

@@ -26,7 +26,9 @@ struct SharedData {
   pthread_mutex_t directory_mutex;
 };
 
+/// Mutex for protecting the KVS from concurrent access.
 pthread_mutex_t kvs_lock = PTHREAD_MUTEX_INITIALIZER;
+/// Mutex for protecting the current backup state.
 pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
 
 size_t active_backups = 0; // Number of active backups
@@ -36,18 +38,18 @@ char *jobs_directory = NULL;
 
 char regist_fifo_name[MAX_PIPE_PATH_LENGTH]; // FIFO of registration
 
+/// Handles the SIGUSR1 signal by disconnecting all clients.
+/// @param signal The signal number (not used in this function).
 void handle_sigusr1(int) {
   disconnect_all_clients();
-
-  // Terminate and reinitialize the KVS
-  kvs_terminate();
-  kvs_init();
-
-  if (signal(SIGUSR1, handle_sigusr1) == SIG_ERR) {
-    fprintf(stderr, "Failed to set signal handler\n");
-  }
 }
 
+/// Processes the entries in a given directory.
+/// @param dir The directory being processed.
+/// @param entry The current directory entry to be processed.
+/// @param in_path The path to the input directory or file.
+/// @param out_path The path to the output directory or file.
+/// @return A status code indicating the success or failure of the operation.
 static int entry_files(const char *dir, struct dirent *entry, char *in_path,
                        char *out_path) {
   const char *dot = strrchr(entry->d_name, '.');
@@ -71,6 +73,11 @@ static int entry_files(const char *dir, struct dirent *entry, char *in_path,
   return 0;
 }
 
+/// Executes a job based on the provided input and output file descriptors, and a specified filename.
+/// @param in_fd The file descriptor for reading input data.
+/// @param out_fd The file descriptor for writing output data.
+/// @param filename The name of the file associated with the job.
+/// @return A status code indicating the success or failure of the job execution.
 static int run_job(int in_fd, int out_fd, char *filename) {
   size_t file_backups = 0;
   while (1) {
@@ -181,7 +188,9 @@ static int run_job(int in_fd, int out_fd, char *filename) {
   }
 }
 
-// frees arguments
+/// Frees arguments and processes files in a given directory.
+/// @param arguments A pointer to the `SharedData` structure containing directory-related data.
+/// @return NULL
 static void *get_file(void *arguments) {
   struct SharedData *thread_data = (struct SharedData *)arguments;
   DIR *dir = thread_data->dir;
@@ -248,34 +257,30 @@ static void *get_file(void *arguments) {
   pthread_exit(NULL);
 }
 
+/// Handles FIFO communication for client registration and connection.
+/// @return None
 void handle_fifo() {
   int regist_fifo, intr, result;
   int request_fd, response_fd, notification_fd;
   char buffer[BUFFER_SIZE] = {0};
   char rw[3] = {OP_CODE_CONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
 
-  // Set signal handler
-  void (*old_handler)(int) = signal(SIGUSR1, handle_sigusr1);
-  if (old_handler == SIG_ERR) {
-    fprintf(stderr, "Failed to set signal handler\n");
+  // Set up signal handler
+  struct sigaction sa;
+  sa.sa_handler = handle_sigusr1;
+  sa.sa_flags = SA_RESTART;
+  sigemptyset(&sa.sa_mask);
+  if (sigaction(SIGUSR1, &sa, NULL) == -1) {
+    fprintf(stderr, "Erro ao configurar signal handler\n");
     return;
   }
 
   // Open FIFO
-  while (1) {
-    regist_fifo = open(regist_fifo_name, O_RDONLY | O_NONBLOCK);
-    if (regist_fifo != -1) break;
-    
-    if (errno != ENOENT && errno != EINTR) {
-      fprintf(stderr, "Failed to open main FIFO\n");
-      return;
-    }
-    sleep(1);
+  regist_fifo = open(regist_fifo_name, O_RDONLY);
+  if (regist_fifo == -1) {
+    fprintf(stderr, "Failed to open registration FIFO\n");
+    return;
   }
-
-  // Change to blocking mode
-  int flags = fcntl(regist_fifo, F_GETFL);
-  fcntl(regist_fifo, F_SETFL, flags & ~O_NONBLOCK);
 
   while (1) {
     result = read_all(regist_fifo, buffer, BUFFER_SIZE-1, &intr);
@@ -353,6 +358,9 @@ void handle_fifo() {
   close(regist_fifo);
 }
 
+/// Dispatches threads to process files in a directory and handles FIFO communication.
+/// @param dir A pointer to the directory stream that is passed to each thread for processing files.
+/// @return None
 static void dispatch_threads(DIR *dir) {
   pthread_t *threads = malloc(max_threads * sizeof(pthread_t));
 

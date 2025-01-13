@@ -61,7 +61,7 @@ int kvs_disconnect(void) {
         return 1;
       }
     } else if (result == 0) {
-      fprintf(stderr, "Server disconnected\n");
+      fprintf(stderr, "Server disconnected B\n");
     }
 
     if (response[1] - '0' != OP_CODE_OK_CDU) {
@@ -242,7 +242,7 @@ int kvs_subscribe(const char *key) {
     } 
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
-    fprintf(stderr, "Server disconnected\n");
+    fprintf(stderr, "Server disconnected C\n");
     disconnect = 1;
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
@@ -263,7 +263,12 @@ int kvs_unsubscribe(const char *key) {
     fprintf(stderr, "Failed to lock mutex\n");
     return 1;
   }
-  if (disconnect) return 2;
+  if (disconnect) {
+    if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+      fprintf(stderr, "Failed to unlock mutex\n");
+    }
+    return 2;
+  }
   if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
     fprintf(stderr, "Failed to unlock mutex\n");
     return 1;
@@ -297,7 +302,7 @@ int kvs_unsubscribe(const char *key) {
     } 
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
-    fprintf(stderr, "Server disconnected\n");
+    fprintf(stderr, "Server disconnected A\n");
     disconnect = 1;
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
@@ -311,6 +316,9 @@ int kvs_unsubscribe(const char *key) {
   return responsev == OP_CODE_OK_CDU ? 0 : 1;
 }
 
+/// Imprime uma notificação com um tamanho especificado, substituindo caracteres nulos por espaços.
+/// @param notification A notificação a ser impressa.
+/// @param length O comprimento da notificação a ser impressa.
 void print_notification(const char* notification, size_t length) {
   // Create a printable string
   char printable_notification[length + 1];
@@ -330,8 +338,7 @@ void print_notification(const char* notification, size_t length) {
     }
   }
 
-  write_str(STDOUT_FILENO, printable_notification);
-  write_str(STDOUT_FILENO, "\n");
+  fprintf(stdout, "%s\n", printable_notification);
 }
 
 void* kvs_notifications(void* arg) {
@@ -387,25 +394,21 @@ void* kvs_notifications(void* arg) {
       fprintf(stderr, "Failed to read from notification pipe\n");
     } else if (result == 0) {
       fprintf(stderr, "Server disconnected (notification pipe closed)\n");
-      break;
+      if (pthread_mutex_lock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to lock mutex\n");
+        return NULL;
+      }
+      disconnect = 1;
+      thread_finished = 1;
+      pthread_cond_signal(&disconnect_cond);
+      if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
+        fprintf(stderr, "Failed to unlock mutex\n");
+        return NULL;
+      }
+      return NULL;
     }
 
     // Print notification
     print_notification(notification, MAX_WRITE_SIZE_RESPONSE);
   }
-
-  if (pthread_mutex_lock(&disconnect_mutex) != 0) {
-    fprintf(stderr, "Failed to lock mutex\n");
-    return NULL;
-  }
-  if (!disconnect) {
-    disconnect = 1;
-    thread_finished = 1;
-    pthread_cond_signal(&disconnect_cond);
-  }
-  if (pthread_mutex_unlock(&disconnect_mutex) != 0) {
-    fprintf(stderr, "Failed to unlock mutex\n");
-    return NULL;
-  }
-  return NULL;
 }

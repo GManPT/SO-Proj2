@@ -19,6 +19,11 @@ int read_all(int fd, void *buffer, size_t size, int *intr);
 /// @param str The string to write.
 void write_str(int fd, const char *str);
 
+
+/// Reads a string from a file descriptor into a buffer.
+/// @param fd The file descriptor from which the string is read.
+/// @param str The buffer where the string will be stored.
+/// @return The number of characters read, or -1 if an error occurs.
 int read_string(int fd, char *str);
 
 /// Writes a given number of bytes to a file descriptor. Will block until all
@@ -29,6 +34,8 @@ int read_string(int fd, char *str);
 /// @return On success, returns 1, on error, returns -1
 int write_all(int fd, const void *buffer, size_t size);
 
+/// Delays the execution for a specified time in milliseconds.
+/// @param time_ms The delay time in milliseconds.
 void delay(unsigned int time_ms);
 
 #endif // COMMON_IO_H

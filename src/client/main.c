@@ -78,7 +78,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Failed to join notifications thread\n");
             return 1;
           }
-          _exit(0);
+          return 0;
         }
         fprintf(stderr, "Command subscribe failed\n");
       }
@@ -98,7 +98,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Failed to join notifications thread\n");
             return 1;
           }
-          _exit(0);
+          return 0;
         }
         fprintf(stderr, "Command unsubscribe failed\n");
       }
@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
         return 1;
       }
       
-      break;
+      return 0;
     }
   }
 }

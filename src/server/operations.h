@@ -81,9 +81,12 @@ void trim_trailing_whitespace(char *str);
 // @return 0 if the key exists, 1 otherwise.
 int kvs_key_exists(const char* key);
 
-// Calls the callback function for the given key and value
-// @param callback Callback function to be called
+// Registers a callback function for write operations in the KVS.
+/// @param callback The function to be called when a write operation is performed.
 void register_write_callback(kvs_callback_t callback);
+
+/// Registers a callback function for delete operations in the KVS.
+/// @param callback The function to be called when a delete operation is performed.
 void register_delete_callback(kvs_callback_t callback); 
 
 #endif // KVS_OPERATIONS_H
