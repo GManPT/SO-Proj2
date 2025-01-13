@@ -217,7 +217,7 @@ void kvs_wait(unsigned int delay_ms) {
 int fifo_init(char *fifo_name) {
   // Remove the FIFO if it already exists
   unlink(fifo_name);
-  if (mkfifo(fifo_name, 0777) == -1) return 1;
+  if (mkfifo(fifo_name, 0640) == -1) return 1;
   return 0;
 }
 

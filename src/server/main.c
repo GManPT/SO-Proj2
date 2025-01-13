@@ -40,7 +40,7 @@ char regist_fifo_name[MAX_PIPE_PATH_LENGTH]; // FIFO of registration
 
 /// Handles the SIGUSR1 signal by disconnecting all clients.
 /// @param signal The signal number (not used in this function).
-void handle_sigusr1(int) {
+void handle_sigusr1() {
   disconnect_all_clients();
 }
 

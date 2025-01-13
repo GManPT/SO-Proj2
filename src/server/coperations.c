@@ -44,7 +44,7 @@ void destroy_int_hash_table(IntHashTable *ht) {
 int add_key(IntHashTable *ht, const char *key, int value) {
     unsigned int index = chash(key);
 
-    pthread_rwlock_rdlock(&ht->tableLock);
+    pthread_rwlock_wrlock(&ht->tableLock);
     IntNode *node = ht->nodes[index];
     pthread_rwlock_unlock(&ht->tableLock);
     
@@ -63,7 +63,7 @@ int add_key(IntHashTable *ht, const char *key, int value) {
 int remove_key(IntHashTable *ht, const char *key, int value) {
     unsigned int index = chash(key);
 
-    pthread_rwlock_rdlock(&ht->tableLock);
+    pthread_rwlock_wrlock(&ht->tableLock);
     IntNode *node = ht->nodes[index];
     pthread_rwlock_unlock(&ht->tableLock);
     

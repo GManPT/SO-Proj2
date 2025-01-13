@@ -126,15 +126,15 @@ int kvs_connect(char const *req_pipe_path, char const *resp_pipe_path,
   unlink(notif_path);
 
   // Create pipes for request, response and notification
-  if (mkfifo(req_path, 0777) == -1) {
+  if (mkfifo(req_path, 0640) == -1) {
     fprintf(stderr, "Failed to create request pipe\n");
     return 1;
   }
-  if (mkfifo(resp_path, 0777) == -1) {
+  if (mkfifo(resp_path, 0640) == -1) {
     fprintf(stderr, "Failed to create response pipe\n");
     return 1;
   }
-  if (mkfifo(notif_path, 0777) == -1) {
+  if (mkfifo(notif_path, 0640) == -1) {
     fprintf(stderr, "Failed to create notification pipe\n");
     return 1;
   }
