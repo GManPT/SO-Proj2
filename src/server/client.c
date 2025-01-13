@@ -73,6 +73,7 @@ void register_callbacks() {
 /// Disconnect a client
 /// @param client_data Client data
 /// @param cdisconnected 1 if the client is already disconnected, 0 otherwise
+/// @return None
 void disconnect_client(ClientData* client_data, int cdisconnected) {
     char response_wrong[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_ERROR_CDU + '0', '\0'};
     char response_right[3] = {OP_CODE_DISCONNECT + '0', OP_CODE_OK_CDU + '0', '\0'};
@@ -80,6 +81,7 @@ void disconnect_client(ClientData* client_data, int cdisconnected) {
 
     if (pthread_mutex_lock(&client_data->clientMutex) != 0) {
         fprintf(stderr, "Failed to lock mutex for thread in position: %d\n", client_data->thread_id);
+        return;
     }
     
     if (client_data->fds[0] >= 0 && close(client_data->fds[0]) == -1) {

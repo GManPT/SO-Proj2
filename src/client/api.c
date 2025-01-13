@@ -11,17 +11,26 @@
 #include "src/common/protocol.h"
 
 
+// Declare request, response, and notification paths with defined max length
 static char req_path[MAX_PIPE_PATH_LENGTH];
 static char resp_path[MAX_PIPE_PATH_LENGTH];
 static char notif_path[MAX_PIPE_PATH_LENGTH];
 
+// Declare file descriptors for request, response, and notification pipes, initialized to -1
 static int request_fd = -1;
 static int response_fd = -1;
 static int notification_fd = -1;
 
+// Initialize mutex for synchronizing disconnect operations
 static pthread_mutex_t disconnect_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Initialize condition variable for managing disconnect signaling
 static pthread_cond_t disconnect_cond = PTHREAD_COND_INITIALIZER;
+
+// Flag to track disconnect status, initialized to 0 (not disconnected)
 static int disconnect = 0;
+
+// Flag to track whether the thread has finished, initialized to 0 (not finished)
 static int thread_finished = 0;
 
 int kvs_disconnect(void) {
@@ -60,16 +69,16 @@ int kvs_disconnect(void) {
         fprintf(stderr, "Failed to read from request pipe\n");
         return 1;
       }
-    } else if (result == 0) {
-      fprintf(stderr, "Server disconnected B\n");
     }
 
-    if (response[1] - '0' != OP_CODE_OK_CDU) {
-      fprintf(stderr, "Server failed to disconnect\n");
-      return 1;
-    }
+    if (result != 0) {
+      if (response[1] - '0' != OP_CODE_OK_CDU) {
+        fprintf(stderr, "Server failed to disconnect\n");
+        return 1;
+      }
 
-    fprintf(stdout, "Server returned %d for operation: disconnect\n", response[1] - '0');
+      fprintf(stdout, "Server returned %d for operation: disconnect\n", response[1] - '0');
+    }
 
     // Close pipes
     if (close(request_fd) == -1) {
@@ -242,7 +251,7 @@ int kvs_subscribe(const char *key) {
     } 
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
-    fprintf(stderr, "Server disconnected C\n");
+    fprintf(stderr, "Server disconnected\n");
     disconnect = 1;
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
@@ -302,7 +311,7 @@ int kvs_unsubscribe(const char *key) {
     } 
     fprintf(stderr, "Failed to read from request pipe\n");
   } else if (result == 0) {
-    fprintf(stderr, "Server disconnected A\n");
+    fprintf(stderr, "Server disconnected\n");
     disconnect = 1;
     if (kvs_disconnect()) {
       fprintf(stderr, "Failed to disconnect\n");
